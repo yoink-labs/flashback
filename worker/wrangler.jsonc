@@ -1,11 +1,12 @@
 {
-  // Flashback API + web app. Not deployed yet: no routes, DNS, or R2 bucket exist.
-  // See README "Deploying later" for the one-time setup.
+  // Flashback API + web app, live at https://flashback.yoinklabs.dev.
+  // R2 bucket `flashback-media` has a 1-day lifecycle rule on rooms/ as a backstop.
   "name": "flashback",
   "account_id": "2bc9c3c136a62ea9dcbddaa6f59edca4",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-16",
   "workers_dev": true,
+  "routes": [{ "pattern": "flashback.yoinklabs.dev", "custom_domain": true }],
   "assets": {
     "directory": "../web/dist",
     "not_found_handling": "single-page-application",
