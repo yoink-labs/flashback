@@ -1,0 +1,25 @@
+{
+  "name": "@yoinklabs/flashback-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "check:auth": "node scripts/check-auth-paths.mjs",
+    "build": "tsc --noEmit && node scripts/check-auth-paths.mjs && vite build"
+  },
+  "dependencies": {
+    "mp4-muxer": "^5.2.2",
+    "qrcode-generator": "^2.0.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.0"
+  }
+}

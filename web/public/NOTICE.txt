@@ -1,0 +1,13 @@
+Flashback web app — third-party notices
+
+Flashback is MIT licensed. Copyright (c) 2026 Undrift LLC.
+https://github.com/yoink-labs/flashback
+
+This app bundles the following open-source software:
+
+- React and React DOM — MIT License, Copyright (c) Meta Platforms, Inc. and affiliates.
+- React Router — MIT License, Copyright (c) React Training LLC 2015-2019, Copyright (c) Remix Software Inc. 2020-2021, Copyright (c) Shopify Inc. 2022-2023.
+- mp4-muxer — MIT License, Copyright (c) 2023 Vanilagy.
+- qrcode-generator — MIT License, Copyright (c) 2009 Kazuhiko Arase. "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
+
+Sign-in is provided by Clerk (clerk-js, loaded from clerk.yoinklabs.dev), MIT License, Copyright (c) 2022 Clerk, Inc.

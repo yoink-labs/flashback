@@ -33,3 +33,7 @@ xcuserdata/
 *.tar.gz
 
 web/dist/
+
+# Local build output
+.build/
+.wrangler/
