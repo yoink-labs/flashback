@@ -1,0 +1,43 @@
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            worker/package-lock.json
+            web/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix ../web
+      - run: npm run typecheck --prefix ../web
+      - run: npm run check:auth --prefix ../web
+      - run: npm run build --prefix ../web
+      - run: npm run typecheck
+      - run: npm test
+  ios:
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Test with Xcode 27.2
+        run: |
+          xcodebuild -version
+          xcodebuild test -project Flashback.xcodeproj -scheme Flashback \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.2' \
+            OTHER_CODE_SIGN_FLAGS=--strip-disallowed-xattrs
