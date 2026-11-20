@@ -2,7 +2,7 @@
 
 A free, open-source [Photo Roulette](https://photoroulette.app) party game with **full photo and video support**. No paywall or Pro tier.
 
-- **Name:** Flashback · planned bundle `com.yoinklabs.flashback`
+- **Name:** Flashback · bundle `com.yoinklabs.flashback`
 - **License:** MIT
 - **Platforms:** native SwiftUI iOS 18+ (iPhone, iPad, iPhone Duo) and a full web app. Phone and browser players share the same rooms.
 - **Identity:** guest play with a 6-character room code and a nickname (no account), **or** optional sign-in with the existing Yoink Labs Clerk instance used by Wanderer, Split, and yoinklabs.dev.
@@ -71,14 +71,16 @@ Debug iOS builds can target a local Worker with the launch argument `-flashbackA
 
 Never put secrets in source, logs, `.env`, or `.dev.vars`. See `worker/.env.example`.
 
-## Deploying later
+## Deployment
 
-Nothing is deployed yet. One-time setup, in order, when approved:
+Flashback is live at https://flashback.yoinklabs.dev. The one-time setup is done:
 
-1. **R2:** create the `flashback-media` bucket in the Yoink Labs Cloudflare account (`2bc9c3c136a62ea9dcbddaa6f59edca4`). Add a lifecycle rule deleting objects under `rooms/` after 1 day as a second backstop.
-2. **Worker:** `npm run build --prefix web && npm run deploy --prefix worker` (Worker `flashback`, Durable Object class `Room` with SQLite storage, free plan).
-3. **DNS / route:** add `flashback.yoinklabs.dev` as a custom domain for the Worker (`routes` in `worker/wrangler.jsonc`).
-4. **Clerk:** add `https://flashback.yoinklabs.dev` as an allowed origin and the iOS app (`com.yoinklabs.flashback`) as a native application on the shared instance. This is a careful, approved change; do not touch existing OAuth or redirect settings.
-5. **Apple:** create the App Store Connect app and register `com.yoinklabs.flashback` with Sign in with Apple and Associated Domains (`applinks:flashback.yoinklabs.dev`). The Worker already serves `/.well-known/apple-app-site-association`.
+1. **R2:** bucket `flashback-media` in the Yoink Labs Cloudflare account (`2bc9c3c136a62ea9dcbddaa6f59edca4`), with lifecycle rule `rooms-backstop` deleting objects under `rooms/` after 1 day.
+2. **Worker:** `flashback` (Durable Object class `Room` with SQLite storage, free plan). Redeploy with `npm run build --prefix web && npm run deploy --prefix worker`.
+3. **DNS / route:** `flashback.yoinklabs.dev` is the Worker's custom domain (`routes` in `worker/wrangler.jsonc`).
+4. **Clerk:** `flashback.yoinklabs.dev` is on the shared production instance's allowed subdomains, and `com.yoinklabs.flashback` (team `64PUT29XZ8`) is a native iOS app with redirect `com.yoinklabs.flashback://callback`. OAuth settings were not changed.
+5. **Apple:** bundle ID `com.yoinklabs.flashback` has Sign in with Apple and Associated Domains (`applinks:flashback.yoinklabs.dev`). The App Store Connect app is "Flashback by Yoink Labs" (SKU `YOINK-FLASHBACK-IOS`), and TestFlight builds are made with Xcode 27.2 and the iOS 27 SDK. The Worker serves `/.well-known/apple-app-site-association`.
+
+The Xcode project is generated: run `xcodegen generate` before building.
 
 Optional: `wrangler secret put CLERK_SECRET_KEY` for future admin or QA tooling. Gameplay never needs it.
