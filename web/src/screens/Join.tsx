@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { isCode, joinRoom, normalizeCode, roomInfo, savedSession, type RoomInfo } from '../api';
 import { Avatar } from '../ui/Avatar';
 import { CodeInput } from '../ui/CodeInput';
+import { TipPill } from '../ui/TipPill';
 import { NameInput, useNickname } from './Entry';
 
 const modeWord = (mode: string) => (mode === 'photos' ? 'Photos' : mode === 'videos' ? 'Videos' : 'Mix');
@@ -64,6 +65,9 @@ export function JoinScreen() {
           ←
         </Link>
         <h1 className="title">Join a game</h1>
+        <span className="screen-head-end">
+          <TipPill />
+        </span>
       </header>
 
       <div className="join-body">

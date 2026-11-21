@@ -7,6 +7,8 @@ struct HomeView: View {
     @EnvironmentObject private var account: AccountStore
     @AppStorage("flashback.lastNickname") private var lastName = ""
     @State private var signingIn = false
+    @State private var tipping = false
+    @State private var showingAbout = false
     @FocusState private var nicknameFocused: Bool
 
     private var nickname: Result<String, NicknameError> { Nickname.validate(room.draftNickname) }
@@ -61,6 +63,12 @@ struct HomeView: View {
         .sheet(isPresented: $signingIn) {
             SignInView().environmentObject(account)
         }
+        .sheet(isPresented: $tipping) {
+            TipJarView(store: .shared)
+        }
+        .sheet(isPresented: $showingAbout) {
+            AboutView()
+        }
         .fullScreenCover(isPresented: $room.showJoin) {
             JoinView()
                 .environmentObject(room)
@@ -68,6 +76,14 @@ struct HomeView: View {
         }
         .onAppear {
             if room.draftNickname.isEmpty { room.draftNickname = lastName }
+            #if DEBUG
+            // Screenshot routes: -uiRoute tipJar | about
+            switch TipDebugLaunch.value("uiRoute") {
+            case "tipJar": tipping = true
+            case "about": showingAbout = true
+            default: break
+            }
+            #endif
         }
         .onChange(of: room.draftNickname) { _, value in
             lastName = value
@@ -131,9 +147,24 @@ struct HomeView: View {
         }
     }
 
+    /// Top bar: the pink "Tip the devs" capsule on the left; About and the
+    /// account on the right. Same on every size class, guests included.
     @ViewBuilder private var accountRow: some View {
-        HStack {
-            Spacer()
+        HStack(spacing: 4) {
+            TipTheDevsButton { tipping = true }
+            Spacer(minLength: 8)
+            Button {
+                showingAbout = true
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(Palette.text2)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("About Flashback")
+            .accessibilityIdentifier("about-button")
             if account.signedIn {
                 Menu {
                     Button("Sign out", role: .destructive) { Task { await account.signOut() } }

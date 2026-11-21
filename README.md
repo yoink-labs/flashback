@@ -43,6 +43,18 @@ Every authenticated call (WebSocket, upload, media, leave) accepts **either** a 
 - **No storage at all.** The room's Durable Object keeps the round's item in memory only and pushes it to the other players as one binary WebSocket frame; the owner shows its own copy. It is dropped when the round ends, the game ends, or the room closes. Nothing goes to R2, D1, KV, or Durable Object storage, and logs never contain media. There is nothing to clean up.
 - Rooms close 2 minutes after everyone disconnects, 15 minutes after a finished game, or after an hour idle in the lobby. Dropped players keep their seat for 90 seconds. If the host leaves or drops, the longest-present player becomes host.
 
+## Tip the devs
+
+Flashback is free with nothing locked. Tips are optional StoreKit 2
+consumables that unlock nothing: `dev.yoinklabs.flashback.tip.small`,
+`.medium` and `.large` (App Store Connect; prices always come from StoreKit).
+They open from the pink "Tip the devs" capsule on Home and the row in About.
+`Flashback/Resources/Flashback.storekit` mirrors them for the scheme and tests.
+DEBUG screenshot flags: `-uiTipJar config` (serve the .storekit file without
+StoreKit), `-uiTipOutcome thanks|pending|failed|cancel`, `-uiRoute tipJar|about`.
+The web header links to https://yoinklabs.dev/tip, which explains where tipping
+happens; nothing is paid on the web.
+
 ## Development
 
 Layout follows Split: `worker/` (Worker + Durable Object + tests), `web/` (Vite + React 19 + React Router 7), `Flashback/` and `FlashbackTests/` (SwiftUI, generated with XcodeGen from `project.yml`).
