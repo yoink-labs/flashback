@@ -81,7 +81,7 @@ export interface RoomInfo {
   capacity: number;
   joinable: boolean;
   host?: string;
-  settings?: RoomSettings;
+  settings?: Partial<RoomSettings>;
 }
 export const roomInfo = (code: string) => call<RoomInfo>(`/v1/rooms/${code}`);
 

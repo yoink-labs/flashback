@@ -8,9 +8,11 @@ import { kindsFor, type Deck } from '../deck';
 import type { ClientMessage, MediaKind, RoomView } from '../types';
 import { Avatar } from '../ui/Avatar';
 import { CrownIcon, PlusIcon, QRIcon, ShareIcon, XIcon } from '../ui/Icons';
+import { ItemIcons } from '../ui/ItemIcons';
 import { toast } from '../ui/Toast';
 import { Deck as Bunch } from './Deck';
 import { Settings } from './Settings';
+import { SettingsChips } from './SettingsChips';
 
 export function Lobby({
   view,
@@ -85,6 +87,7 @@ export function Lobby({
                     <CrownIcon />
                   </span>
                 )}
+                <ItemIcons items={player.items} className="avatar-items" />
               </span>
               <span className="player-chip-name">{player.id === view.you.id ? 'You' : player.nickname}</span>
             </li>
@@ -98,6 +101,7 @@ export function Lobby({
         </ul>
 
         <Settings settings={view.settings} isHost={isHost} send={send} />
+        <SettingsChips settings={view.settings} />
       </section>
 
       <section className="lobby-bunch">

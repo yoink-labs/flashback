@@ -1,0 +1,511 @@
+/* Milestone 4: Arcade. Settings groups, lobby chips, streak/round effects on
+   the media, power-ups, the shop strip and the shared video host.
+   Tokens and spacing follow docs/DESIGN.md. */
+
+/* ---- shared video (docs/MILESTONE4.md §8) ---- */
+
+/* The hub's host never takes layout space: the <video> behaves as a direct
+   child of whichever surface holds it. */
+.hub-video-host {
+  display: contents;
+}
+
+.tile-video {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  animation: fade-in 0.18s ease-out;
+}
+
+/* ---- media effects on the reveal (§3, §4) ---- */
+
+.media-chips {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top));
+  left: calc(12px + env(safe-area-inset-left));
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: min(74%, 340px);
+  pointer-events: none;
+}
+
+.media-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.62);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.media-chip svg {
+  flex: none;
+}
+
+/* ---- power-up bar (§5/§9) ---- */
+
+.powerup-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: -2px;
+}
+
+.powerup-btn,
+.powerup-pill {
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 13px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.powerup-btn {
+  background: var(--surface-2);
+  color: var(--text);
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.powerup-btn svg {
+  color: var(--text-2);
+}
+
+.powerup-btn.charged svg {
+  color: var(--accent);
+}
+
+.powerup-btn:disabled {
+  background: var(--surface);
+  color: var(--text-3);
+}
+
+.powerup-btn:disabled svg {
+  color: var(--text-3);
+}
+
+@media (hover: hover) {
+  .powerup-btn:hover:not(:disabled) {
+    background: var(--line);
+  }
+}
+
+.powerup-pill {
+  background: var(--surface);
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.powerup-pill svg {
+  color: var(--good);
+}
+
+/* ---- public item icons on avatars (§6) ---- */
+
+.item-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 0;
+  color: var(--text-2);
+}
+
+.item-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.item-count {
+  position: relative;
+  top: -3px;
+  left: -2px;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.guess-avatar {
+  position: relative;
+  display: inline-flex;
+}
+
+.guess-items,
+.avatar-items {
+  position: absolute;
+  right: -6px;
+  bottom: -5px;
+  padding: 2px 4px;
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.guess.eliminated .avatar {
+  filter: grayscale(1);
+  opacity: 0.32;
+}
+
+.guess.eliminated .guess-name {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+
+.guess-out {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-3);
+  line-height: 1;
+}
+
+.result-items {
+  flex: none;
+  margin-left: 2px;
+  color: var(--text-3);
+}
+
+/* ---- settings sheet groups (§9) ---- */
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-group + .settings-group {
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.group-title {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.setting-label.with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setting-label.with-icon svg {
+  color: var(--text-3);
+  flex: none;
+}
+
+.setting-caption {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text-3);
+}
+
+.setting-note {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.toggle {
+  position: relative;
+  width: 56px;
+  height: 44px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+}
+
+.toggle::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 50%;
+  height: 28px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: var(--surface-2);
+  transition: background 0.2s ease;
+}
+
+.toggle.on::before {
+  background: var(--accent);
+}
+
+.toggle-knob {
+  position: relative;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
+  transition: transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+.toggle.on .toggle-knob {
+  transform: translateX(26px);
+}
+
+.effect-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.effect-block + .effect-block {
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.effect-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-left: 2px;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--line);
+  animation: effect-open 0.22s ease-out;
+}
+
+@keyframes effect-open {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.effect-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.effect-control.inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.effect-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* ---- lobby / join settings chips (§9) ---- */
+
+.flag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: -12px;
+}
+
+.flag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.flag-chip-icon {
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+.room-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.join-chips {
+  margin-top: 0;
+}
+
+/* ---- results: breakdown and shop (§7, §9) ---- */
+
+.you-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.you-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-2);
+}
+
+.you-line svg {
+  flex: none;
+}
+
+.you-line.good {
+  color: var(--good);
+}
+
+.you-line.bad {
+  color: var(--bad);
+}
+
+.you-line.muted {
+  color: var(--text-2);
+}
+
+.shop-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.shop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shop-title {
+  font-size: 17px;
+}
+
+.shop-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.shop-card {
+  min-width: 0;
+  min-height: 128px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 10px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: left;
+  transition: background 0.2s ease, transform 0.12s ease;
+}
+
+.shop-card:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+@media (hover: hover) {
+  .shop-card:hover:not(:disabled) {
+    background: var(--surface-2);
+  }
+}
+
+.shop-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.shop-icon {
+  display: inline-flex;
+  color: var(--text-2);
+  flex: none;
+}
+
+.shop-name {
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.shop-effect {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text-2);
+}
+
+.shop-card.off .shop-icon,
+.shop-card.off .shop-name,
+.shop-card.off .shop-effect {
+  color: var(--text-3);
+}
+
+.shop-price {
+  margin-top: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--gold);
+}
+
+.shop-price.reason {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-3);
+}
+
+@media (max-width: 374px) {
+  .shop-card {
+    min-height: 136px;
+    padding: 10px 8px;
+  }
+  .shop-name {
+    font-size: 12px;
+  }
+  .shop-effect {
+    font-size: 11px;
+  }
+}
+
+/* Wide reveal: the chips stay in the media's top-leading corner. */
+@media (min-width: 900px) {
+  .media-chips {
+    top: 16px;
+    left: 16px;
+  }
+  .reveal-side .powerup-bar {
+    justify-content: flex-start;
+  }
+}

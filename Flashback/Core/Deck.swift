@@ -54,13 +54,24 @@ struct PreparedItem: Equatable {
 
     var items: [DeckItem] { state.items }
     var used: Set<String> { state.used }
-    var kinds: [MediaKind] { DeckState.kinds(mode) }
+    /// The steps this room actually uses. Even Split can size a kind at 0
+    /// (e.g. two rounds over four players in Mix), and an empty step would only
+    /// confuse the review.
+    var kinds: [MediaKind] { DeckState.kinds(mode).filter { state.requiredSize($0) > 0 } }
 
     func bunch(_ kind: MediaKind) -> Bunch { state[kind] }
     func counts(mode: MediaMode) -> DeckCount { state.counts(mode) }
     func item(_ id: String) -> DeckItem? { state.item(id) }
     func isDealing(_ kind: MediaKind) -> Bool { dealing.contains(kind) }
     func note(_ kind: MediaKind) -> String? { notes[kind] }
+
+    /// The room's required bunch size for a kind (Milestone 4 §2).
+    func requiredSize(_ kind: MediaKind) -> Int { state.requiredSize(kind) }
+    /// The bunch is complete for the room's mode and current bunch sizes.
+    func fits(_ mode: MediaMode) -> Bool { state.fits(mode) }
+    /// How many items one pick may add: the usual 60, or enough for a large
+    /// Even Split bunch.
+    func maxPickCount(_ kind: MediaKind) -> Int { max(DeckState.poolLimit, state.requiredSize(kind)) }
 
     /// A deal or swap is still landing: Ready / Start wait, so the counts the
     /// server sees are never from a half-applied bunch.
@@ -69,15 +80,51 @@ struct PreparedItem: Equatable {
     /// The step the lobby should show: the chosen one when the room uses it.
     var currentStep: MediaKind { kinds.contains(step) ? step : (kinds.first ?? .photo) }
 
-    /// Room settings arrived or changed: media mode and swaps (clamped).
-    func configure(_ settings: RoomSettings) {
+    private var topUpWork: Task<Void, Never>?
+
+    /// Room settings arrived or changed: media mode, swaps (clamped), and the
+    /// server's bunch sizes. A bunch that grew is topped up from wherever it was
+    /// dealt; one that shrank already dropped its extra tiles from the end.
+    func configure(_ settings: RoomSettings, bunch: BunchRequirement) {
         let oldMode = mode
         mode = settings.mediaMode
         var next = state
         next.configure(swaps: settings.swaps)
+        let requirementChanged = next.setRequirement(bunch)
         if next != state { state = next }
         if !kinds.contains(step) { step = kinds.first ?? .photo }
-        if oldMode != mode { notes = [:]; notify() }
+        if oldMode != mode { notes = [:] }
+        if requirementChanged {
+            notify()
+            scheduleTopUp()
+        } else if oldMode != mode {
+            notify()
+        }
+    }
+
+    /// Grows every dealt bunch to the room's required size. Empty bunches are
+    /// left to the player's "Deal my photos" button, so joining a room never
+    /// triggers a surprise library permission prompt.
+    func topUpToRequirement() async {
+        for kind in kinds {
+            let missing = state.requiredSize(kind) - state[kind].items.count
+            guard missing > 0, !state[kind].items.isEmpty, !dealing.contains(kind) else { continue }
+            dealing.insert(kind)
+            notes[kind] = nil
+            let items = await draw(kind, count: missing, from: state[kind].source, replacing: true)
+            state.topUp(kind, items: items)
+            dealing.remove(kind)
+            notify()
+        }
+    }
+
+    private func scheduleTopUp() {
+        topUpWork?.cancel()
+        let needsMore = kinds.contains {
+            state.requiredSize($0) > state[$0].items.count && !state[$0].items.isEmpty
+        }
+        guard needsMore else { return }
+        topUpWork = Task { [weak self] in await self?.topUpToRequirement() }
     }
 
     /// Shown (or unusable) this session. Not a bunch change: counts stay the same.
@@ -102,7 +149,7 @@ struct PreparedItem: Equatable {
         notes[kind] = nil
         defer { dealing.remove(kind) }
 
-        let size = DeckState.size(kind)
+        let size = requiredSize(kind)
         if state[kind].source == .picked, state.poolCount(kind) > 0 {
             state.deal(kind, items: await draw(kind, count: size, from: .picked, replacing: false), source: .picked)
         } else {
@@ -172,10 +219,10 @@ struct PreparedItem: Equatable {
         defer { dealing.remove(kind) }
         let bunch = state[kind]
         if bunch.source == .picked, !bunch.items.isEmpty {
-            let room = DeckState.size(kind) - bunch.items.count
+            let room = requiredSize(kind) - bunch.items.count
             state.topUp(kind, items: await draw(kind, count: room, from: .picked, replacing: true))
         } else {
-            state.deal(kind, items: await draw(kind, count: DeckState.size(kind), from: .picked, replacing: false), source: .picked)
+            state.deal(kind, items: await draw(kind, count: requiredSize(kind), from: .picked, replacing: false), source: .picked)
         }
         if state[kind].items.isEmpty { notes[kind] = "Couldn't read those items. Try different ones." }
         notify()

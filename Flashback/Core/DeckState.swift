@@ -89,9 +89,11 @@ enum SwapResult: Equatable {
 /// and a video bunch of 6, each with its own swaps and New bunch. Swapped-out
 /// items are never drawn again while the pool has anything else.
 struct DeckState: Equatable {
+    /// The Milestone 3 defaults, kept for fixtures and for old servers.
     static let photoSize = DeckCount.photoBunch
     static let videoSize = DeckCount.videoBunch
-    /// The system picker allows this many per pick, and the pool per kind keeps at most this many.
+    /// The system picker allows this many per pick, and the pool per kind keeps
+    /// at least this many (more when the room's bunch is larger).
     static let poolLimit = 60
 
     static func size(_ kind: MediaKind) -> Int { kind == .photo ? photoSize : videoSize }
@@ -118,6 +120,10 @@ struct DeckState: Equatable {
     var seen: Set<String> = []
     /// `settings.swaps` as last applied; nil until the room's settings arrive.
     var swapLimit: Int?
+    /// The room's bunch sizes (Milestone 4 §2). The server owns this: Even
+    /// Split and the player count decide it, and clients keep bunches exactly
+    /// this size.
+    var requirement: BunchRequirement = .defaults
 
     init(swappedOut: Set<String> = []) {
         self.swappedOut = swappedOut
@@ -126,6 +132,25 @@ struct DeckState: Equatable {
     subscript(kind: MediaKind) -> Bunch {
         get { kind == .photo ? photos : videos }
         set { if kind == .photo { photos = newValue } else { videos = newValue } }
+    }
+
+    /// How many items this bunch must hold right now.
+    func requiredSize(_ kind: MediaKind) -> Int { requirement.size(kind) }
+
+    /// Applies the room's bunch sizes. Growing is the caller's job (it needs
+    /// the library or the pool); shrinking drops tiles from the end, exactly as
+    /// the contract says. Returns whether the requirement changed.
+    @discardableResult
+    mutating func setRequirement(_ requirement: BunchRequirement) -> Bool {
+        let changed = self.requirement != requirement
+        self.requirement = requirement
+        for kind in [MediaKind.photo, .video] {
+            let size = requiredSize(kind)
+            if self[kind].items.count > size {
+                self[kind].items = Array(self[kind].items.prefix(max(0, size)))
+            }
+        }
+        return changed
     }
 
     /// Both bunches, photos first.
@@ -144,13 +169,19 @@ struct DeckState: Equatable {
         Self.kinds(mode).flatMap { self[$0].items }
     }
 
-    /// The counts sent to the server: bunch items fitting the mode, capped at the bunch size.
+    /// The counts sent to the server: bunch items fitting the mode, capped at
+    /// the room's required size.
     func counts(_ mode: MediaMode) -> DeckCount {
         let kinds = Self.kinds(mode)
         return DeckCount(
-            photos: kinds.contains(.photo) ? min(photos.items.count, Self.photoSize) : 0,
-            videos: kinds.contains(.video) ? min(videos.items.count, Self.videoSize) : 0
+            photos: kinds.contains(.photo) ? min(photos.items.count, requiredSize(.photo)) : 0,
+            videos: kinds.contains(.video) ? min(videos.items.count, requiredSize(.video)) : 0
         )
+    }
+
+    /// Whether this player's bunches are complete for the room (server `deckFits`).
+    func fits(_ mode: MediaMode) -> Bool {
+        requirement.fits(counts(mode), mode: mode)
     }
 
     /// Unused bunch items that fit the mode (and `kind`, when the server asked
@@ -178,7 +209,7 @@ struct DeckState: Equatable {
     /// New bunch: replaces every item of that kind and resets its swaps.
     mutating func deal(_ kind: MediaKind, items newItems: [DeckItem], source: Bunch.Source) {
         var bunch = Bunch()
-        bunch.items = Array(newItems.filter { $0.kind == kind }.prefix(Self.size(kind)))
+        bunch.items = Array(newItems.filter { $0.kind == kind }.prefix(requiredSize(kind)))
         bunch.swapsLeft = swapLimit ?? RoomSettings.defaults.swaps
         bunch.source = source
         self[kind] = bunch
@@ -190,7 +221,7 @@ struct DeckState: Equatable {
     /// it up and swaps and New bunch draw from library items and picks alike.
     mutating func dealFromLibrary(_ kind: MediaKind, items newItems: [DeckItem]) {
         let fitting = newItems.filter { $0.kind == kind }
-        guard fitting.count < Self.size(kind) else {
+        guard fitting.count < requiredSize(kind) else {
             return deal(kind, items: fitting, source: .library)
         }
         addToPool(fitting)
@@ -201,7 +232,7 @@ struct DeckState: Equatable {
     mutating func topUp(_ kind: MediaKind, items newItems: [DeckItem]) {
         var bunch = self[kind]
         let existing = Set(bunch.items.map(\.id))
-        let room = max(0, Self.size(kind) - bunch.items.count)
+        let room = max(0, requiredSize(kind) - bunch.items.count)
         let added = newItems.filter { $0.kind == kind && !existing.contains($0.id) }.prefix(room)
         bunch.items.append(contentsOf: added)
         self[kind] = bunch
@@ -224,14 +255,14 @@ struct DeckState: Equatable {
         return .swapped
     }
 
-    /// Adds items to the pool (deduplicated, at most `poolLimit` per kind).
+    /// Adds items to the pool (deduplicated, at most the pool cap per kind).
     /// Returns how many were added.
     @discardableResult
     mutating func addToPool(_ newItems: [DeckItem]) -> Int {
         var added = 0
         var existing = Set(pool.map(\.id))
         var counts = [MediaKind.photo: poolCount(.photo), .video: poolCount(.video)]
-        for item in newItems where !existing.contains(item.id) && counts[item.kind, default: 0] < Self.poolLimit {
+        for item in newItems where !existing.contains(item.id) && counts[item.kind, default: 0] < poolCap(item.kind) {
             pool.append(item)
             existing.insert(item.id)
             counts[item.kind, default: 0] += 1
@@ -239,6 +270,10 @@ struct DeckState: Equatable {
         }
         return added
     }
+
+    /// The pool keeps at least the usual 60 per kind, and enough for a room
+    /// whose Even Split bunch is larger than that.
+    func poolCap(_ kind: MediaKind) -> Int { max(Self.poolLimit, requiredSize(kind)) }
 
     func poolCount(_ kind: MediaKind) -> Int { pool.filter { $0.kind == kind }.count }
 
@@ -283,10 +318,10 @@ struct DeckState: Equatable {
     }
 
     /// "You have 4 of 6 videos": set when a bunch was dealt but the pool could
-    /// not fill it.
+    /// not fill the room's required size.
     func shortfall(_ kind: MediaKind) -> Int? {
         let count = self[kind].items.count
-        guard count > 0, count < Self.size(kind) else { return nil }
+        guard count > 0, count < requiredSize(kind) else { return nil }
         return count
     }
 }

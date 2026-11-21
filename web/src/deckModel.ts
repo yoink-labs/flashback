@@ -11,13 +11,18 @@
 // replaced for free.
 //
 // No DOM or React here, so it runs under `node --test` (web/test).
-import type { DeckCounts, MediaKind, MediaMode } from './types';
+import type { BunchRequirement, DeckCounts, MediaKind, MediaMode } from './types';
 
 export const PHOTO_BUNCH = 12;
 export const VIDEO_BUNCH = 6;
 export const BUNCH_SIZE: Record<MediaKind, number> = { photo: PHOTO_BUNCH, video: VIDEO_BUNCH };
+/** The M3 sizes; `types.ts`'s `STANDARD_BUNCH` is the same value for the views. */
+const DEFAULT_SIZES: BunchRequirement = { photos: PHOTO_BUNCH, videos: VIDEO_BUNCH };
 export const MAX_POOL = 400;
 export const KINDS: readonly MediaKind[] = ['photo', 'video'];
+
+/** How many tiles a bunch of this kind must hold (docs/MILESTONE4.md §2). */
+export const sizeFor = (sizes: BunchRequirement, kind: MediaKind) => (kind === 'photo' ? Math.max(0, sizes.photos) : Math.max(0, sizes.videos));
 
 export interface DeckItem {
   id: string;
@@ -69,9 +74,10 @@ export const fitsMode = (kind: MediaKind, mode: MediaMode) => mode === 'both' ||
 /** The kinds a mode needs, in review-step order. */
 export const kindsFor = (mode: MediaMode): MediaKind[] => KINDS.filter((kind) => fitsMode(kind, mode));
 
-/** Mirrors the server's `deckFits` (worker/src/bunch.ts). */
-export const deckFits = (counts: DeckCounts, mode: MediaMode) =>
-  (!fitsMode('photo', mode) || counts.photos >= PHOTO_BUNCH) && (!fitsMode('video', mode) || counts.videos >= VIDEO_BUNCH);
+/** Mirrors the server's `deckFits` (worker/src/bunch.ts) for the room's `bunch`. */
+export const deckFits = (counts: DeckCounts, mode: MediaMode, sizes: BunchRequirement = DEFAULT_SIZES) =>
+  (!fitsMode('photo', mode) || counts.photos >= sizeFor(sizes, 'photo')) &&
+  (!fitsMode('video', mode) || counts.videos >= sizeFor(sizes, 'video'));
 
 export function shuffled<T>(list: readonly T[], random: Random = Math.random): T[] {
   const copy = [...list];
@@ -101,11 +107,11 @@ function draw(model: DeckModel, kind: MediaKind, count: number, exclude: Readonl
 }
 
 /** Deals into any empty slots of either bunch. A bunch dealt from empty starts with fresh swaps. */
-function fillEmptySlots(model: DeckModel, random: Random): DeckModel {
+function fillEmptySlots(model: DeckModel, random: Random, sizes: BunchRequirement): DeckModel {
   let next = model;
   for (const kind of KINDS) {
     const bunch = next[kind];
-    const [drawn, fill] = draw(next, kind, BUNCH_SIZE[kind] - bunch.ids.length, new Set(bunch.ids), random);
+    const [drawn, fill] = draw(next, kind, sizeFor(sizes, kind) - bunch.ids.length, new Set(bunch.ids), random);
     if (fill.length) next = { ...drawn, [kind]: { ids: [...bunch.ids, ...fill], swapsUsed: bunch.ids.length ? bunch.swapsUsed : 0 } };
   }
   return next;
@@ -132,6 +138,7 @@ export function addFiles(
   kindOf: (file: File) => MediaKind | null,
   newID: () => string,
   random: Random = Math.random,
+  sizes: BunchRequirement = DEFAULT_SIZES,
 ): [DeckModel, AddSummary] {
   const media = files.flatMap((file) => {
     const kind = kindOf(file);
@@ -165,7 +172,7 @@ export function addFiles(
     seen: union(model.seen, carriedSeen),
     vetoed: union(model.vetoed, carriedVetoed),
   };
-  return [fillEmptySlots(grown, random), summary];
+  return [fillEmptySlots(grown, random, sizes), summary];
 }
 
 /** Replaces one tile with another random item of its kind, using one of `allowed` swaps. */
@@ -182,14 +189,35 @@ export function swap(model: DeckModel, kind: MediaKind, slot: number, allowed: n
 }
 
 /** Deals a fresh bunch of one kind (as fresh as the pool allows) and resets its swaps. */
-export function newBunch(model: DeckModel, kind: MediaKind, random: Random = Math.random): DeckModel {
+export function newBunch(model: DeckModel, kind: MediaKind, random: Random = Math.random, required = BUNCH_SIZE[kind]): DeckModel {
   const current = new Set(model[kind].ids);
   const usable = model.pool.filter((item) => item.kind === kind && !model.failed.has(item.id)).length;
-  const size = Math.min(BUNCH_SIZE[kind], usable);
+  const size = Math.min(Math.max(0, required), usable);
   // Everything not in the current bunch first; top up from it only when the pool is small.
   const [afterFresh, fresh] = draw(model, kind, size, current, random);
   const [afterRest, rest] = draw(afterFresh, kind, size - fresh.length, new Set(fresh), random);
   return { ...afterRest, [kind]: { ids: shuffled([...fresh, ...rest], random), swapsUsed: 0 } };
+}
+
+/**
+ * Keeps both bunches at exactly the room's required size (docs/MILESTONE4.md
+ * §2): a grown bunch auto-deals the extra tiles from the pool and a shrunk one
+ * drops tiles from the end. Swaps are never charged for this. Returns the same
+ * model when nothing changes, so callers can commit unconditionally.
+ */
+export function resize(model: DeckModel, sizes: BunchRequirement, random: Random = Math.random): DeckModel {
+  let next = model;
+  for (const kind of KINDS) {
+    const target = sizeFor(sizes, kind);
+    const bunch = next[kind];
+    if (bunch.ids.length > target) {
+      next = { ...next, [kind]: { ...bunch, ids: bunch.ids.slice(0, target) } };
+    } else if (bunch.ids.length < target) {
+      const [drawn, fill] = draw(next, kind, target - bunch.ids.length, new Set(bunch.ids), random);
+      if (fill.length) next = { ...drawn, [kind]: { ids: [...bunch.ids, ...fill], swapsUsed: bunch.ids.length ? bunch.swapsUsed : 0 } };
+    }
+  }
+  return next;
 }
 
 /**
@@ -251,26 +279,27 @@ export interface BunchView {
   full: boolean;
 }
 
-export function bunchView(model: DeckModel, kind: MediaKind, swaps: number): BunchView {
+export function bunchView(model: DeckModel, kind: MediaKind, swaps: number, required = BUNCH_SIZE[kind]): BunchView {
   const items = bunchItems(model, kind);
   const poolSize = model.pool.reduce((count, item) => count + (item.kind === kind && !model.failed.has(item.id) ? 1 : 0), 0);
+  const size = Math.max(0, required);
   return {
     kind,
-    size: BUNCH_SIZE[kind],
+    size,
     items,
     poolSize,
     swapsLeft: Math.max(0, swaps - model[kind].swapsUsed),
     canSwap: poolSize > items.length,
-    full: items.length >= BUNCH_SIZE[kind],
+    full: items.length >= size,
   };
 }
 
 /**
- * What the server is told: the bunches that fit the mode, capped at the bunch
- * size. Videos count only when this browser can convert them.
+ * What the server is told: the bunches that fit the mode, capped at the room's
+ * required size. Videos count only when this browser can convert them.
  */
-export function deckCounts(model: DeckModel, mode: MediaMode, canSendVideos: boolean): DeckCounts {
-  const count = (kind: MediaKind) => Math.min(BUNCH_SIZE[kind], model[kind].ids.filter((id) => !model.failed.has(id)).length);
+export function deckCounts(model: DeckModel, mode: MediaMode, canSendVideos: boolean, sizes: BunchRequirement = DEFAULT_SIZES): DeckCounts {
+  const count = (kind: MediaKind) => Math.min(sizeFor(sizes, kind), model[kind].ids.filter((id) => !model.failed.has(id)).length);
   return {
     photos: fitsMode('photo', mode) ? count('photo') : 0,
     videos: fitsMode('video', mode) && canSendVideos ? count('video') : 0,

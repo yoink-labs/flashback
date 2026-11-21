@@ -207,22 +207,29 @@ struct JoinView: View {
 
     @ViewBuilder private var roomPreview: some View {
         if let info = room.roomInfo {
-            HStack(spacing: 14) {
-                Avatar(name: info.host ?? info.code, size: 40, color: Palette.playerColor(0))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(info.host.map { "\($0)'s room" } ?? "Room \(info.code)")
-                        .font(.flHeadline)
-                        .foregroundStyle(Palette.text)
-                        .lineLimit(1)
-                    Text("\(info.players) \(info.players == 1 ? "player" : "players") · \(info.settings?.mediaMode.label ?? "Mix") · \(RoomSettings.roundsLabel(info.rounds))")
-                        .font(.flCaption)
-                        .foregroundStyle(Palette.text2)
-                        .lineLimit(1)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 14) {
+                    Avatar(name: info.host ?? info.code, size: 40, color: Palette.playerColor(0))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(info.host.map { "\($0)'s room" } ?? "Room \(info.code)")
+                            .font(.flHeadline)
+                            .foregroundStyle(Palette.text)
+                            .lineLimit(1)
+                        Text("\(info.players) \(info.players == 1 ? "player" : "players") · \(info.settings?.mediaMode.label ?? "Mix") · \(RoomSettings.roundsLabel(info.rounds))")
+                            .font(.flCaption)
+                            .foregroundStyle(Palette.text2)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .padding(14)
+                .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
+
+                // The same enabled-feature chips the lobby shows (§9).
+                if let settings = info.settings {
+                    SettingsChipRow(settings: settings)
+                }
             }
-            .padding(14)
-            .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
         } else if room.previewLoading {
             HStack(spacing: 10) {
                 ProgressView().tint(Palette.text2)

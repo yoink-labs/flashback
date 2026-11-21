@@ -375,6 +375,9 @@ struct PlayerChip: View {
         VStack(spacing: 6) {
             ZStack(alignment: .topTrailing) {
                 PlayerAvatar(view: view, playerID: player.id, size: 56, showsReady: true)
+                    .overlay(alignment: .bottomTrailing) {
+                        ItemIcons(items: player.items).offset(x: 7, y: 7)
+                    }
                 if player.isHost { CrownBadge().offset(x: 6, y: -6) }
             }
             Text(player.nickname)
@@ -384,7 +387,7 @@ struct PlayerChip: View {
                 .frame(maxWidth: 76)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(player.nickname)\(player.isHost ? ", host" : "")\(player.ready ? ", ready" : "")")
+        .accessibilityLabel("\(player.nickname)\(player.isHost ? ", host" : "")\(player.ready ? ", ready" : "")\(player.items.hasAny ? ", \(player.items.accessibilityLabel)" : "")")
     }
 }
 
@@ -403,6 +406,9 @@ struct PlayerListRow: View {
                 .font(.fl(17, .semibold))
                 .foregroundStyle(player.connected ? Palette.text : Palette.text3)
                 .lineLimit(1)
+            if player.items.hasAny {
+                ItemIcons(items: player.items, iconSize: 9)
+            }
             Spacer(minLength: 8)
             if !player.connected {
                 Text("away")
