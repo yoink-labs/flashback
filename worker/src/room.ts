@@ -5,18 +5,25 @@
 // Clerk tokens and forwards requests here with an internal identity header; this
 // object is not reachable from the internet.
 import { DurableObject } from 'cloudflare:workers';
-import { CAPACITY, Game, GameError, newRoom, defaultRandomness, type Randomness, type RoomState } from './game';
-import { kindAllowed, kindForContentType, maxBytes, MediaError, validateMedia, type MediaKind } from './media';
+import { CAPACITY, Game, GameError, newRoom, normalizeRoom, defaultRandomness, type Randomness, type RoomState, type Slot, type TurnRequest } from './game';
+import { kindAllowed, kindForContentType, maxBytes, MediaError, validateMedia, type MediaKind, type MediaMode } from './media';
 import { issueSession, newSessionKey, verifySession, SESSION_REFRESH_WINDOW_SECONDS } from './session';
 import { randomID } from './codes';
 
 export const IDENTITY_HEADER = 'x-flashback-identity';
 export const WS_PROTOCOL = 'flashback.v2';
 
+/** A socket may send this many messages per window; more than that is abuse, not play. */
+export const MESSAGE_LIMIT = 60;
+export const MESSAGE_WINDOW_MS = 10_000;
+
 export type ForwardedIdentity = { kind: 'room'; token: string } | { kind: 'clerk'; sub: string } | { kind: 'anonymous' };
 
 interface Attachment {
   playerID: string;
+  /** Fixed-window message counter; kept in the attachment so it survives hibernation. */
+  windowAt?: number;
+  windowCount?: number;
 }
 
 /** The bytes for one open slot, kept in memory for this object's lifetime. */
@@ -37,6 +44,10 @@ interface FrameHeader {
 }
 
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+
+/** The one place the `turn` message shape lives: only the slot's owner receives it. */
+const turnMessage = (turn: { slot: string; game: number; round: number; mode: MediaMode; kind: MediaKind }) =>
+  JSON.stringify({ type: 'turn', ...turn });
 
 /** `[uint32 BE header length][UTF-8 JSON header][media bytes]`, server → client only. */
 export function mediaFrame(header: FrameHeader, bytes: Uint8Array): ArrayBuffer {
@@ -61,7 +72,9 @@ export class Room extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      this.state = (await ctx.storage.get<RoomState>('room')) ?? null;
+      // Rooms persisted by an older build are normalized to the current shape.
+      const stored = await ctx.storage.get<RoomState>('room');
+      this.state = stored ? normalizeRoom(stored) : null;
       this.key = (await ctx.storage.get<Uint8Array>('key')) ?? null;
     });
   }
@@ -86,7 +99,14 @@ export class Room extends DurableObject<Env> {
     if (next === null) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(next);
     this.broadcast(game, game.removed);
-    for (const request of game.turnRequests) this.sendTurn(request.playerID, request.slot, request.game, request.round, request.mode);
+    for (const request of game.turnRequests) this.sendTurn(request);
+  }
+
+  /** Sends a frame, ignoring sockets that are already closing. */
+  private send(ws: WebSocket, data: string | ArrayBuffer) {
+    try {
+      ws.send(data);
+    } catch {}
   }
 
   private broadcast(game: Game, removed: string[] = []) {
@@ -96,9 +116,9 @@ export class Room extends DurableObject<Env> {
       if (!attachment) continue;
       try {
         if (removed.includes(attachment.playerID) || !game.player(attachment.playerID)) {
-          ws.send(JSON.stringify({ type: 'closed', reason: 'removed' }));
+          this.send(ws, JSON.stringify({ type: 'closed', reason: 'removed' }));
           ws.close(4001, 'Removed from room');
-        } else ws.send(JSON.stringify({ type: 'state', state: game.view(attachment.playerID, now) }));
+        } else this.send(ws, JSON.stringify({ type: 'state', state: game.view(attachment.playerID, now) }));
       } catch {
         // Socket already closing.
       }
@@ -109,8 +129,8 @@ export class Room extends DurableObject<Env> {
   private async destroy() {
     this.media.clear();
     for (const ws of this.ctx.getWebSockets()) {
+      this.send(ws, JSON.stringify({ type: 'closed', reason: 'room-closed' }));
       try {
-        ws.send(JSON.stringify({ type: 'closed', reason: 'room-closed' }));
         ws.close(4000, 'Room closed');
       } catch {}
     }
@@ -145,13 +165,9 @@ export class Room extends DurableObject<Env> {
     return mediaFrame({ type: 'media', game: media.game, round: media.round, kind: media.kind, contentType: media.contentType }, media.bytes);
   }
 
-  private sendTurn(playerID: string, slot: string, game: number, round: number, mode: RoomState['settings']['mediaMode']) {
-    const text = JSON.stringify({ type: 'turn', slot, game, round, mode });
-    for (const ws of this.ctx.getWebSockets(playerID)) {
-      try {
-        ws.send(text);
-      } catch {}
-    }
+  private sendTurn(request: TurnRequest) {
+    const text = turnMessage(request);
+    for (const ws of this.ctx.getWebSockets(request.playerID)) this.send(ws, text);
   }
 
   /** Sends a ready slot's bytes to every connected socket except its owner. */
@@ -163,32 +179,27 @@ export class Room extends DurableObject<Env> {
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as Attachment | null;
       if (!attachment || attachment.playerID === slot.ownerID) continue;
-      try {
-        ws.send(frame);
-      } catch {}
+      this.send(ws, frame);
     }
   }
 
   /** After a socket's first state message: re-send its turn and any media still held. */
   private sendMissed(ws: WebSocket, playerID: string, state: RoomState) {
     for (const slot of state.slots) {
-      if (slot.status === 'requested' && slot.ownerID === playerID) this.sendTurnTo(ws, slot.id, state.game, slot.round, state.settings.mediaMode);
+      if (slot.status === 'requested' && slot.ownerID === playerID) this.sendTurnTo(ws, state, slot);
     }
     // Owners get their own item too: a client that restarted has lost its copy,
     // and showing "didn't load" only to the owner would give the owner away.
     for (const [slotID, media] of this.media) {
       if (media.game !== state.game) continue;
-      if (!state.slots.some((sl) => sl.id === slotID)) continue;
-      try {
-        ws.send(this.frameFor(media));
-      } catch {}
+      const slot = state.slots.find((sl) => sl.id === slotID);
+      if (!slot || slot.status !== 'ready') continue;
+      this.send(ws, this.frameFor(media));
     }
   }
 
-  private sendTurnTo(ws: WebSocket, slot: string, game: number, round: number, mode: RoomState['settings']['mediaMode']) {
-    try {
-      ws.send(JSON.stringify({ type: 'turn', slot, game, round, mode }));
-    } catch {}
+  private sendTurnTo(ws: WebSocket, state: RoomState, slot: Slot) {
+    this.send(ws, turnMessage({ slot: slot.id, game: state.game, round: slot.round, mode: state.settings.mediaMode, kind: slot.requiredKind }));
   }
 
   // ---- requests from the Worker ----
@@ -277,6 +288,9 @@ export class Room extends DurableObject<Env> {
     const kind = kindForContentType(request.headers.get('Content-Type'));
     if (!kindAllowed(game.state.settings.mediaMode, kind))
       throw new MediaError(422, game.state.settings.mediaMode === 'photos' ? 'The host chose Photos only.' : 'The host chose Videos only.');
+    // Reject the wrong kind before reading up to 8 MB of bytes; markReady checks
+    // again on the fresh state in case the turn moved on meanwhile.
+    if (kind !== slot.requiredKind) throw new GameError(422, slot.requiredKind === 'photo' ? 'This round needs a photo.' : 'This round needs a video.');
     const raw = await readLimited(request, maxBytes(kind));
     const { bytes } = validateMedia(kind, raw);
     const contentType = kind === 'photo' ? 'image/jpeg' : 'video/mp4';
@@ -300,6 +314,21 @@ export class Room extends DurableObject<Env> {
 
   // ---- WebSocket events (hibernation API) ----
 
+  /**
+   * A fixed-window limit per socket. Every accepted message clones the room,
+   * writes it to storage, and broadcasts it to everyone, so one client must not
+   * be able to make the room do that in a loop (pause/resume or deck spam).
+   */
+  private allowMessage(ws: WebSocket, attachment: Attachment | null, now: number) {
+    if (!attachment) return true;
+    const started = attachment.windowAt;
+    const within = started !== undefined && now >= started && now - started < MESSAGE_WINDOW_MS;
+    const count = (within ? (attachment.windowCount ?? 0) : 0) + 1;
+    if (count > MESSAGE_LIMIT) return false;
+    ws.serializeAttachment({ ...attachment, windowAt: within ? started : now, windowCount: count } satisfies Attachment);
+    return true;
+  }
+
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
     const attachment = ws.deserializeAttachment() as Attachment | null;
     let message: ClientMessage;
@@ -308,11 +337,16 @@ export class Room extends DurableObject<Env> {
       message = JSON.parse(raw);
       if (!message || typeof message.type !== 'string') throw 0;
     } catch {
-      ws.send(JSON.stringify({ type: 'error', message: 'Could not read that message.' }));
+      this.send(ws, JSON.stringify({ type: 'error', message: 'Could not read that message.' }));
+      return;
+    }
+    const now = this.now();
+    if (!this.allowMessage(ws, attachment, now)) {
+      this.send(ws, JSON.stringify({ type: 'error', message: 'Slow down.', request: message.type }));
       return;
     }
     if (message.type === 'ping') {
-      ws.send(JSON.stringify({ type: 'pong', serverNow: this.now() }));
+      this.send(ws, JSON.stringify({ type: 'pong', serverNow: now }));
       return;
     }
     try {
@@ -322,14 +356,12 @@ export class Room extends DurableObject<Env> {
         this.sendMediaForRound(ws, message.round);
         return;
       }
-      apply(game, attachment.playerID, message, this.now());
+      apply(game, attachment.playerID, message, now);
       await this.commit(game);
     } catch (error) {
       const text = error instanceof GameError ? error.message : 'Something went wrong. Try again.';
       if (!(error instanceof GameError)) console.error(JSON.stringify({ event: 'ws_error', type: error instanceof Error ? error.name : 'unknown' }));
-      try {
-        ws.send(JSON.stringify({ type: 'error', message: text, request: message.type }));
-      } catch {}
+      this.send(ws, JSON.stringify({ type: 'error', message: text, request: message.type }));
     }
   }
 
@@ -338,10 +370,9 @@ export class Room extends DurableObject<Env> {
     if (typeof round !== 'number' || !this.state) return;
     for (const [slotID, media] of this.media) {
       if (media.round !== round || media.game !== this.state.game) continue;
-      if (!this.state.slots.some((sl) => sl.id === slotID)) return;
-      try {
-        ws.send(this.frameFor(media));
-      } catch {}
+      const slot = this.state.slots.find((sl) => sl.id === slotID);
+      if (!slot || slot.status !== 'ready') continue;
+      this.send(ws, this.frameFor(media));
       return;
     }
   }
@@ -372,13 +403,15 @@ export class Room extends DurableObject<Env> {
 
 export type ClientMessage =
   | { type: 'ready'; ready: boolean }
-  | { type: 'settings'; rounds?: unknown; timerSeconds?: unknown; mediaMode?: unknown }
+  | { type: 'settings'; rounds?: unknown; timerSeconds?: unknown; mediaMode?: unknown; breakSeconds?: unknown; swaps?: unknown }
   | { type: 'deck'; photos?: unknown; videos?: unknown }
   | { type: 'start' }
   | { type: 'guess'; targetID: unknown }
   | { type: 'pass'; slot: string }
   | { type: 'needMedia'; round?: unknown }
   | { type: 'advance' }
+  | { type: 'pause' }
+  | { type: 'resume' }
   | { type: 'end' }
   | { type: 'playAgain' }
   | { type: 'leave' }
@@ -389,7 +422,17 @@ export function apply(game: Game, playerID: string, message: ClientMessage, now:
     case 'ready':
       return game.setReady(playerID, message.ready === true, now);
     case 'settings':
-      return game.updateSettings(playerID, { rounds: message.rounds, timerSeconds: message.timerSeconds, mediaMode: message.mediaMode }, now);
+      return game.updateSettings(
+        playerID,
+        {
+          rounds: message.rounds,
+          timerSeconds: message.timerSeconds,
+          mediaMode: message.mediaMode,
+          breakSeconds: message.breakSeconds,
+          swaps: message.swaps,
+        },
+        now,
+      );
     case 'deck':
       return game.setDeck(playerID, message.photos, message.videos, now);
     case 'start':
@@ -400,6 +443,10 @@ export function apply(game: Game, playerID: string, message: ClientMessage, now:
       return game.pass(playerID, String(message.slot), now);
     case 'advance':
       return game.advance(playerID, now);
+    case 'pause':
+      return game.pause(playerID, now);
+    case 'resume':
+      return game.resume(playerID, now);
     case 'end':
       return game.end(playerID, now);
     case 'playAgain':

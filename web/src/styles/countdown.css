@@ -1,0 +1,254 @@
+/* In-game shell (game bar, drain bars, pause overlay) and the countdown ring. */
+
+/* ---- in-game shell ---- */
+
+.game-screen {
+  padding-top: calc(8px + env(safe-area-inset-top));
+}
+
+.game-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+}
+
+.game-bar-label {
+  color: var(--text-2);
+}
+
+.drain {
+  overflow: hidden;
+}
+
+.drain span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left center;
+  transform: scaleX(var(--from));
+  animation: bar-drain var(--duration) linear forwards;
+  will-change: transform;
+}
+
+.drain.warns span {
+  animation: bar-drain var(--duration) linear forwards, bar-warn 0.2s var(--warn-delay) ease forwards;
+}
+
+.drain.ending span {
+  background: var(--bad);
+}
+
+.drain.frozen span {
+  animation: none;
+}
+
+@keyframes bar-drain {
+  from {
+    transform: scaleX(var(--from));
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes bar-warn {
+  to {
+    background: var(--bad);
+  }
+}
+
+.next-bar {
+  height: 4px;
+  margin-top: 4px;
+  border-radius: 2px;
+  background: var(--surface);
+}
+
+.pause-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  padding: calc(20px + env(safe-area-inset-top)) var(--pad) calc(16px + env(safe-area-inset-bottom));
+  background: rgb(14 13 18 / 0.84);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  animation: fade-in 0.2s ease-out;
+}
+
+.pause-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.pause-glyph {
+  width: 72px;
+  height: 72px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.pause-center .caption {
+  font-size: 15px;
+}
+
+.pause-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.pause-actions .caption {
+  padding-bottom: 8px;
+}
+
+/* ---- countdown ---- */
+
+.countdown-screen {
+  text-align: center;
+}
+
+.countdown-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding-bottom: 44px;
+}
+
+.countdown-round {
+  font-size: 15px;
+  color: var(--text-2);
+}
+
+.ring {
+  position: relative;
+  width: 96px;
+  height: 96px;
+}
+
+.ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.ring-track,
+.ring-fill {
+  fill: none;
+  stroke-width: 6;
+}
+
+.ring-track {
+  stroke: var(--surface-2);
+}
+
+.ring-fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: calc(1 - var(--from));
+  animation: ring-drain var(--duration) linear forwards;
+}
+
+.ring.frozen .ring-fill {
+  animation: none;
+}
+
+@keyframes ring-drain {
+  from {
+    stroke-dashoffset: calc(1 - var(--from));
+  }
+  to {
+    stroke-dashoffset: 1;
+  }
+}
+
+.ring-inner {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+.countdown-digit {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  animation: digit-in 0.3s ease-out;
+}
+
+@keyframes digit-in {
+  from {
+    transform: scale(1.06);
+    opacity: 0.4;
+  }
+}
+
+.countdown-word {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.shuffle-stack {
+  position: relative;
+  width: 160px;
+  height: 96px;
+}
+
+.shuffle-stack span {
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  width: 60px;
+  height: 78px;
+  margin-left: -30px;
+  border-radius: 10px;
+  border: 3px solid #fff;
+  background: var(--surface-2);
+  box-shadow: 0 8px 20px rgb(0 0 0 / 0.35);
+  animation: shuffle-card 1.6s ease-in-out infinite;
+}
+
+.shuffle-stack span:nth-child(1) {
+  background: #ff6b6b;
+  animation-delay: 0s;
+}
+
+.shuffle-stack span:nth-child(2) {
+  background: #4fc3ff;
+  animation-delay: -0.53s;
+}
+
+.shuffle-stack span:nth-child(3) {
+  background: #ffe066;
+  animation-delay: -1.06s;
+}
+
+@keyframes shuffle-card {
+  0%,
+  100% {
+    transform: translateX(-26px) rotate(-8deg);
+  }
+  50% {
+    transform: translateX(26px) rotate(8deg);
+  }
+}

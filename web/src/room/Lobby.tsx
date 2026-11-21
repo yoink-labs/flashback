@@ -1,12 +1,15 @@
-// The lobby: room code once, the people, your deck, one settings row, and the
-// single action that starts the game. No cards, no rules paragraph.
+// The lobby. Phone: one column (code, people, settings, your bunch) with the
+// one primary action pinned in the thumb zone. Wide (≥ 900 px): the bunch is
+// the canvas on the left, sized to fill the height; the room controls are the
+// tools on the right.
 import { useMemo, useState } from 'react';
 import qrcode from 'qrcode-generator';
-import type { Deck } from '../deck';
-import type { ClientMessage, RoomView } from '../types';
+import { kindsFor, type Deck } from '../deck';
+import type { ClientMessage, MediaKind, RoomView } from '../types';
 import { Avatar } from '../ui/Avatar';
-import { CrownIcon, XIcon } from '../ui/Icons';
-import { Deck as DeckGrid } from './Deck';
+import { CrownIcon, PlusIcon, QRIcon, ShareIcon, XIcon } from '../ui/Icons';
+import { toast } from '../ui/Toast';
+import { Deck as Bunch } from './Deck';
 import { Settings } from './Settings';
 
 export function Lobby({
@@ -25,19 +28,22 @@ export function Lobby({
   const me = view.players.find((player) => player.id === view.you.id);
   const ready = Boolean(me?.ready);
   const url = `${location.origin}/join/${view.code}`;
-  const [copied, setCopied] = useState(false);
   const [showQR, setShowQR] = useState(false);
+  const kinds = kindsFor(view.settings.mediaMode);
+  const [chosenStep, setStep] = useState<MediaKind>(() => (deck.photo.full && !deck.video.full ? 'video' : 'photo'));
+  const step = kinds.includes(chosenStep) ? chosenStep : kinds[0];
+  // Mix: once the photos are dealt, the primary action walks to the videos.
+  const nextToVideos = kinds.length === 2 && step === 'photo' && deck.photo.full && !deck.video.full;
 
   const copy = async () => {
     try {
       await navigator.clipboard?.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
+      toast('Invite link copied');
     } catch {}
   };
 
   const share = async () => {
-    if (!navigator.share) return copy();
+    if (!navigator.share || !window.matchMedia?.('(pointer: coarse)').matches) return copy();
     try {
       await navigator.share({ title: 'Join my Flashback game', url });
     } catch {}
@@ -45,27 +51,31 @@ export function Lobby({
 
   return (
     <div className="lobby">
-      <div className="lobby-left">
-        <button type="button" className="icon-btn lobby-leave" onClick={onLeave} aria-label="Leave room">
-          <XIcon />
-        </button>
+      <section className="lobby-room" aria-label="Room">
+        <div className="lobby-top">
+          <button type="button" className="round-btn ghost" onClick={onLeave} aria-label="Leave room" data-testid="leave-room">
+            <XIcon />
+          </button>
+        </div>
 
         <div className="lobby-code">
-          <button type="button" className="code-hero" onClick={copy} title="Copy the invite link" data-testid="room-code-display">
+          <button type="button" className="code-hero" onClick={copy} aria-label={`Room code ${view.code}. Copy the invite link`} data-testid="room-code-display">
             {view.code}
           </button>
           <div className="code-actions">
             <button type="button" className="pill-btn" onClick={share}>
-              {copied ? 'Link copied' : 'Share invite'}
+              <ShareIcon size={18} />
+              Share invite
             </button>
-            <button type="button" className="pill-btn" onClick={() => setShowQR((value) => !value)} aria-expanded={showQR}>
+            <button type="button" className={`pill-btn${showQR ? ' on' : ''}`} onClick={() => setShowQR((value) => !value)} aria-expanded={showQR}>
+              <QRIcon size={18} />
               QR
             </button>
           </div>
           {showQR && <QR text={url} />}
         </div>
 
-        <ul className="players-row">
+        <ul className="players-row" aria-label="Players">
           {view.players.map((player, index) => (
             <li key={player.id} className={`player-chip${player.connected ? '' : ' offline'}`}>
               <span className="avatar-wrap">
@@ -76,46 +86,59 @@ export function Lobby({
                   </span>
                 )}
               </span>
-              <span className="player-chip-name">{player.nickname}</span>
+              <span className="player-chip-name">{player.id === view.you.id ? 'You' : player.nickname}</span>
             </li>
           ))}
-          <li className="player-chip invite-row">
+          <li className="player-chip invite-chip">
             <button type="button" className="player-add" onClick={share} aria-label="Invite someone">
-              +
+              <PlusIcon size={22} />
             </button>
-            <span className="player-add-label">Invite</span>
+            <span className="player-chip-name">Invite</span>
           </li>
         </ul>
 
-        <div className="lobby-settings">
-          <Settings settings={view.settings} isHost={isHost} send={send} />
-        </div>
+        <Settings settings={view.settings} isHost={isHost} send={send} />
+      </section>
 
-        <div className="lobby-bar">
-          {view.startBlocker && (
-            <p className="blocker" role="status">
-              {view.startBlocker}
-            </p>
-          )}
-          {isHost ? (
-            <button type="button" className="btn primary action-btn" disabled={Boolean(view.startBlocker)} onClick={() => send({ type: 'start' })}>
-              Start game
-            </button>
+      <section className="lobby-bunch">
+        <Bunch deck={deck} mode={view.settings.mediaMode} step={step} onStep={setStep} />
+      </section>
+
+      <div className="lobby-bar">
+        <div className="lobby-bar-inner">
+          {nextToVideos ? (
+            <>
+              <p className="blocker">Photos done. Now your videos</p>
+              <button type="button" className="btn primary action-btn" onClick={() => setStep('video')} data-testid="next-videos">
+                Next: videos
+              </button>
+            </>
           ) : (
-            <button
-              type="button"
-              className={`btn action-btn ${ready ? 'secondary' : 'primary'}`}
-              aria-pressed={ready}
-              onClick={() => send({ type: 'ready', ready: !ready })}
-            >
-              {ready ? 'I’m ready ✓' : 'Ready'}
-            </button>
+            <>
+              {view.startBlocker && (
+                <p className="blocker" role="status">
+                  {view.startBlocker}
+                </p>
+              )}
+              {isHost ? (
+                <button type="button" className="btn primary action-btn" disabled={Boolean(view.startBlocker)} onClick={() => send({ type: 'start' })} data-testid="start-game">
+                  Start game
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={`btn action-btn ${ready ? 'secondary' : 'primary'}`}
+                  aria-pressed={ready}
+                  disabled={!ready && !deck.fits}
+                  onClick={() => send({ type: 'ready', ready: !ready })}
+                  data-testid="ready"
+                >
+                  {ready ? 'I’m ready ✓' : 'Ready'}
+                </button>
+              )}
+            </>
           )}
         </div>
-      </div>
-
-      <div className="lobby-deck">
-        <DeckGrid deck={deck} mode={view.settings.mediaMode} />
       </div>
     </div>
   );

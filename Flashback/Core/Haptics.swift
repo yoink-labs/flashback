@@ -10,3 +10,10 @@ import UIKit
     static func incorrect() { UINotificationFeedbackGenerator().notificationOccurred(.error) }
     static func podium() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
 }
+
+extension Haptics {
+    /// Saved to Photos.
+    static func saved() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+    /// Tapped a tile with no swaps left.
+    static func denied() { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+}

@@ -12,9 +12,14 @@
 //
 // Start rule: the host can start when at least two players are in the room,
 // every other player is ready (pressing Start is the host's ready), and every
-// player's local deck has at least one item that fits the media mode.
-import { kindAllowed, type MediaKind, type MediaMode } from './media';
+// player's local bunch is full for the mode (12 photos and/or 6 videos).
+//
+// Milestone 3 adds host pause/resume, a host-set break length between rounds,
+// and a balanced photo/video kind for every round, decided at start.
+import { balancedRoundKinds, deckFits, deckNeed, type Deck } from './bunch';
+import { type MediaKind, type MediaMode } from './media';
 import { assertUniqueNickname, normalizeNickname } from './nickname';
+import { beginPause, clearPause, endPause } from './pause';
 import { rankFinal, rankRound, scoreGuess } from './scoring';
 
 export const CAPACITY = 12;
@@ -26,9 +31,15 @@ export const COUNTDOWN_MS = 3_000;
 export const MEDIA_SETTLE_MS = 1_200;
 /** A requested slot with no upload is reassigned after this long. */
 export const UPLOAD_TIMEOUT_MS = 20_000;
-export const RESULTS_MS = 7_000;
+/** A pause longer than this resumes itself. */
+export const PAUSE_MAX_MS = 10 * 60_000;
 /** A dropped player keeps their seat this long (app switch, fold, flaky Wi-Fi). */
 export const DISCONNECT_GRACE_MS = 90_000;
+/**
+ * A dropped host keeps the host role this long before it moves on. Phones drop
+ * their socket whenever the host switches apps (to share the invite, say).
+ */
+export const HOST_GRACE_MS = 15_000;
 /** A room with nobody connected is torn down after this. */
 export const EMPTY_ROOM_GRACE_MS = 2 * 60_000;
 /** Finished games (podium) with no Play Again are torn down after this. */
@@ -37,6 +48,8 @@ export const FINISHED_ROOM_GRACE_MS = 15 * 60_000;
 export const IDLE_ROOM_MS = 60 * 60_000;
 export const ROUNDS = { min: 1, max: 30, default: 10 } as const;
 export const TIMER_SECONDS = { min: 10, max: 60, default: 20 } as const;
+export const BREAK_SECONDS = { min: 3, max: 30, default: 7 } as const;
+export const SWAPS = { min: 0, max: 10, default: 3 } as const;
 export const DECK_MAX = 500;
 export const MEDIA_MODES: readonly MediaMode[] = ['photos', 'videos', 'both'];
 
@@ -46,13 +59,12 @@ export interface Settings {
   rounds: number;
   timerSeconds: number;
   mediaMode: MediaMode;
+  /** How long the results screen lasts between rounds. */
+  breakSeconds: number;
+  /** How many times a player may swap a tile in their bunch (clients only). */
+  swaps: number;
 }
 
-/** Counts of the items a player currently has available in their local deck. */
-export interface Deck {
-  photos: number;
-  videos: number;
-}
 
 export interface Player {
   id: string;
@@ -84,6 +96,9 @@ export interface Slot {
   ownerID: string;
   status: 'requested' | 'ready';
   requestedAt: number;
+  /** The kind this round plays; the owner must upload this kind. Never sent to non-owners. */
+  requiredKind: MediaKind;
+  /** The uploaded item's kind, set when ready. */
   kind?: MediaKind;
   /** Owners asked for this round so far. */
   attempts: number;
@@ -137,6 +152,7 @@ export interface TurnRequest {
   game: number;
   round: number;
   mode: MediaMode;
+  kind: MediaKind;
 }
 
 export interface RoomState {
@@ -155,9 +171,15 @@ export interface RoomState {
   lastOwnerID: string | null;
   game: number;
   totalRounds: number;
+  /** The kind of each round this game, balanced across photos and videos. */
+  roundKinds: MediaKind[];
   round: RoundState | null;
   lastResult: RoundResult | null;
   phaseEndsAt: number | null;
+  /** When the host paused the game (null while it is running). */
+  pausedAt: number | null;
+  /** Time left in the phase when it was paused (null if it had no deadline). */
+  pausedRemainingMs: number | null;
   emptySince: number | null;
   nextJoinSeq: number;
 }
@@ -193,16 +215,25 @@ export function newRoom(code: string, instance: string, now: number): RoomState 
     lastActivityAt: now,
     phase: 'lobby',
     hostID: null,
-    settings: { rounds: ROUNDS.default, timerSeconds: TIMER_SECONDS.default, mediaMode: 'both' },
+    settings: {
+      rounds: ROUNDS.default,
+      timerSeconds: TIMER_SECONDS.default,
+      mediaMode: 'both',
+      breakSeconds: BREAK_SECONDS.default,
+      swaps: SWAPS.default,
+    },
     players: [],
     slots: [],
     owned: {},
     lastOwnerID: null,
     game: 1,
     totalRounds: 0,
+    roundKinds: [],
     round: null,
     lastResult: null,
     phaseEndsAt: null,
+    pausedAt: null,
+    pausedRemainingMs: null,
     emptySince: now,
     nextJoinSeq: 1,
   };
@@ -211,11 +242,38 @@ export function newRoom(code: string, instance: string, now: number): RoomState 
 const intIn = (value: unknown, range: { min: number; max: number }): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= range.min && value <= range.max;
 
-const modeLabel = (mode: MediaMode) => (mode === 'photos' ? 'a photo' : mode === 'videos' ? 'a video' : 'a photo or video');
+/** Fills anything missing or out of range, so every reader sees the full settings shape. */
+function normalizeSettings(raw: Partial<Settings> | null | undefined): Settings {
+  const settings = raw ?? {};
+  return {
+    rounds: intIn(settings.rounds, ROUNDS) ? settings.rounds : ROUNDS.default,
+    timerSeconds: intIn(settings.timerSeconds, TIMER_SECONDS) ? settings.timerSeconds : TIMER_SECONDS.default,
+    mediaMode: MEDIA_MODES.includes(settings.mediaMode as MediaMode) ? (settings.mediaMode as MediaMode) : 'both',
+    breakSeconds: intIn(settings.breakSeconds, BREAK_SECONDS) ? settings.breakSeconds : BREAK_SECONDS.default,
+    swaps: intIn(settings.swaps, SWAPS) ? settings.swaps : SWAPS.default,
+  };
+}
 
-/** Whether a deck has at least one item that the media mode can use. */
-export const deckFits = (deck: Deck, mode: MediaMode) =>
-  mode === 'photos' ? deck.photos > 0 : mode === 'videos' ? deck.videos > 0 : deck.photos + deck.videos > 0;
+/**
+ * Rooms persisted by an older build lack `breakSeconds`, `swaps`, the pause
+ * fields, the balanced round kinds, each slot's required kind, deck counts, and
+ * a countdown start. Normalize on load so nothing downstream has to handle the
+ * gaps (and so no deadline can be computed from `undefined`).
+ */
+export function normalizeRoom(state: RoomState): RoomState {
+  state.settings = normalizeSettings(state.settings);
+  state.players = state.players ?? [];
+  state.slots = state.slots ?? [];
+  state.owned = state.owned ?? {};
+  state.pausedAt = state.pausedAt ?? null;
+  state.pausedRemainingMs = state.pausedRemainingMs ?? null;
+  state.roundKinds = Array.isArray(state.roundKinds) ? state.roundKinds : [];
+  const fallbackKind: MediaKind = state.settings.mediaMode === 'videos' ? 'video' : 'photo';
+  for (const slot of state.slots) slot.requiredKind = slot.requiredKind ?? slot.kind ?? fallbackKind;
+  for (const player of state.players) player.deck = player.deck ?? { photos: 0, videos: 0 };
+  if (state.round && typeof state.round.countdownStart !== 'number') state.round.countdownStart = state.lastActivityAt;
+  return state;
+}
 
 export class Game {
   /** Turns the Durable Object should deliver (only to each owner's sockets). */
@@ -228,7 +286,9 @@ export class Game {
   constructor(
     public state: RoomState,
     private random: Randomness = defaultRandomness,
-  ) {}
+  ) {
+    normalizeRoom(state);
+  }
 
   // ---- queries ----
 
@@ -251,8 +311,22 @@ export class Game {
     if (this.state.hostID !== id) throw new GameError(403, 'Only the host can do that.');
   }
 
-  private fits(deck: Deck) {
+  private bunchFits(deck: Deck) {
     return deckFits(deck, this.state.settings.mediaMode);
+  }
+
+  /** Whether the deck still has an item of the round's kind to offer. */
+  private hasKind(deck: Deck, kind: MediaKind) {
+    return kind === 'photo' ? deck.photos > 0 : deck.videos > 0;
+  }
+
+  private slotForRound(round: number) {
+    return this.state.slots.find((slot) => slot.round === round);
+  }
+
+  /** The kind round N plays, from the balanced list decided at start. */
+  private kindForRound(round: number): MediaKind {
+    return this.state.roundKinds[round - 1] ?? (this.state.settings.mediaMode === 'videos' ? 'video' : 'photo');
   }
 
   /**
@@ -264,11 +338,12 @@ export class Game {
     if (s.phase !== 'lobby') return 'A game is already running.';
     if (s.players.length < MIN_PLAYERS) return 'Waiting for players';
     for (const p of s.players) {
-      if (!this.fits(p.deck)) return p.id === viewerID ? `Add ${modeLabel(s.settings.mediaMode)} to your deck` : `Waiting for ${p.nickname}`;
+      const need = deckNeed(p.deck, s.settings.mediaMode);
+      if (need) return p.id === viewerID ? need : `Waiting for ${p.nickname}`;
     }
     // The host never presses Ready: pressing Start is their ready.
     for (const p of s.players) {
-      if (!p.ready && p.id !== s.hostID) return p.id === viewerID ? 'Tap Ready when your deck looks good' : `Waiting for ${p.nickname}`;
+      if (!p.ready && p.id !== s.hostID) return p.id === viewerID ? 'Tap Ready when your bunch looks good' : `Waiting for ${p.nickname}`;
     }
     return null;
   }
@@ -328,7 +403,6 @@ export class Game {
     if (!p || !p.connected) return;
     p.connected = false;
     p.disconnectedAt = now;
-    if (this.state.hostID === id) this.transferHost();
     if (!this.state.players.some((x) => x.connected)) this.state.emptySince = now;
     this.reassignSlotsFor(id, now);
     if (this.state.phase === 'reveal') this.finishIfEveryoneGuessed(now);
@@ -372,14 +446,17 @@ export class Game {
     if (!intIn(photos, { min: 0, max: DECK_MAX }) || !intIn(videos, { min: 0, max: DECK_MAX }))
       throw new GameError(422, `Deck counts must be 0–${DECK_MAX}.`);
     p.deck = { photos, videos };
-    if (p.ready && !this.fits(p.deck)) p.ready = false;
+    if (p.ready && !this.bunchFits(p.deck)) p.ready = false;
     this.state.lastActivityAt = now;
   }
 
   setReady(id: string, ready: boolean, now: number) {
     const p = this.require(id);
     if (this.state.phase !== 'lobby') throw new GameError(409, 'You can only ready up in the lobby.');
-    if (ready && !this.fits(p.deck)) throw new GameError(422, `Add ${modeLabel(this.state.settings.mediaMode)} before you ready up.`);
+    if (ready) {
+      const need = deckNeed(p.deck, this.state.settings.mediaMode);
+      if (need) throw new GameError(422, `${need} before you ready up.`);
+    }
     p.ready = ready;
     this.state.lastActivityAt = now;
   }
@@ -401,9 +478,17 @@ export class Game {
       if (!MEDIA_MODES.includes(patch.mediaMode as MediaMode)) throw new GameError(422, 'Choose Photos, Videos, or Both.');
       next.mediaMode = patch.mediaMode as MediaMode;
     }
+    if (patch.breakSeconds !== undefined) {
+      if (!intIn(patch.breakSeconds, BREAK_SECONDS)) throw new GameError(422, `Break must be ${BREAK_SECONDS.min}–${BREAK_SECONDS.max} seconds.`);
+      next.breakSeconds = patch.breakSeconds;
+    }
+    if (patch.swaps !== undefined) {
+      if (!intIn(patch.swaps, SWAPS)) throw new GameError(422, `Swaps must be ${SWAPS.min}–${SWAPS.max}.`);
+      next.swaps = patch.swaps;
+    }
     s.settings = next;
     // Anyone whose deck no longer fits the mode must add more before readying.
-    for (const p of s.players) if (p.ready && !this.fits(p.deck)) p.ready = false;
+    for (const p of s.players) if (p.ready && !this.bunchFits(p.deck)) p.ready = false;
     s.lastActivityAt = now;
   }
 
@@ -412,17 +497,22 @@ export class Game {
   /** Finished rounds owned this game plus open slots owned now. */
   private ownedRounds(id: string) {
     const s = this.state;
-    return (s.owned?.[id] ?? 0) + s.slots.filter((slot) => slot.ownerID === id).length;
+    return (s.owned[id] ?? 0) + s.slots.filter((slot) => slot.ownerID === id).length;
   }
 
   /**
    * Fewest rounds owned so far, avoiding the other open slot's owner and the
    * previous round's owner when possible, then random. Players already tried
    * for this round are excluded.
+   *
+   * A player only needs one item of the round's kind to be asked: a bunch that
+   * has shrunk since the lobby (a pool that ran dry) can still supply a round.
+   * The full-bunch rule gates readying up and starting, not mid-game turns.
    */
   private pickOwner(round: number, tried: string[]): string | null {
     const s = this.state;
-    const eligible = s.players.filter((p) => p.connected && this.fits(p.deck) && !tried.includes(p.id));
+    const kind = this.kindForRound(round);
+    const eligible = s.players.filter((p) => p.connected && this.hasKind(p.deck, kind) && !tried.includes(p.id));
     if (!eligible.length) return null;
     const fewest = Math.min(...eligible.map((p) => this.ownedRounds(p.id)));
     let pool = eligible.filter((p) => this.ownedRounds(p.id) === fewest);
@@ -435,13 +525,30 @@ export class Game {
   }
 
   private requestTurn(slot: Slot) {
-    this.turnRequests.push({ playerID: slot.ownerID, slot: slot.id, game: this.state.game, round: slot.round, mode: this.state.settings.mediaMode });
+    this.turnRequests.push({
+      playerID: slot.ownerID,
+      slot: slot.id,
+      game: this.state.game,
+      round: slot.round,
+      mode: this.state.settings.mediaMode,
+      kind: slot.requiredKind,
+    });
   }
 
   private createSlot(round: number, now: number): Slot | null {
     const ownerID = this.pickOwner(round, []);
     if (!ownerID) return null;
-    const slot: Slot = { id: this.random.id(), round, ownerID, status: 'requested', requestedAt: now, attempts: 0, readyAt: null, tried: [] };
+    const slot: Slot = {
+      id: this.random.id(),
+      round,
+      ownerID,
+      status: 'requested',
+      requestedAt: now,
+      requiredKind: this.kindForRound(round),
+      attempts: 0,
+      readyAt: null,
+      tried: [],
+    };
     this.state.slots.push(slot);
     this.requestTurn(slot);
     return slot;
@@ -453,7 +560,8 @@ export class Game {
     const s = this.state;
     const slot = s.slots.find((sl) => sl.id === slotID);
     if (!slot || slot.status !== 'requested' || slot.ownerID !== id) throw new GameError(409, 'That turn has already ended.');
-    if (!kindAllowed(s.settings.mediaMode, kind)) throw new GameError(422, `The host chose ${s.settings.mediaMode === 'photos' ? 'Photos' : 'Videos'} only.`);
+    // The owner must supply the round's kind; the slot stays requested otherwise.
+    if (kind !== slot.requiredKind) throw new GameError(422, slot.requiredKind === 'photo' ? 'This round needs a photo.' : 'This round needs a video.');
     slot.status = 'ready';
     slot.kind = kind;
     slot.readyAt = now;
@@ -465,6 +573,8 @@ export class Game {
   private syncCountdown(slot: Slot) {
     const s = this.state;
     if (s.phase !== 'countdown' || !s.round || s.round.slotID !== slot.id || slot.readyAt === null) return;
+    // While paused the upload is accepted but the deadline is set on resume.
+    if (this.paused) return;
     s.phaseEndsAt = Math.max(s.round.countdownStart + COUNTDOWN_MS, slot.readyAt + MEDIA_SETTLE_MS);
   }
 
@@ -528,12 +638,15 @@ export class Game {
     const blocker = this.startBlocker();
     if (blocker) throw new GameError(409, blocker);
     const s = this.state;
+    clearPause(s);
     for (const p of s.players) Object.assign(p, { score: 0, streak: 0, bestStreak: 0, correctMs: 0, correctCount: 0 });
     s.slots = [];
     s.owned = {};
     s.lastOwnerID = null;
     s.lastResult = null;
     s.totalRounds = s.settings.rounds;
+    // Decide every round's kind up front so photos and videos are balanced.
+    s.roundKinds = balancedRoundKinds(s.totalRounds, s.settings.mediaMode, this.random);
     s.lastActivityAt = now;
     for (let round = 1; round <= Math.min(s.totalRounds, LOOKAHEAD); round++) this.createSlot(round, now);
     this.beginRound(1, now);
@@ -542,7 +655,7 @@ export class Game {
   private beginRound(index: number, now: number) {
     const s = this.state;
     if (s.players.length < MIN_PLAYERS) return this.endGame(now);
-    const slot = s.slots.find((sl) => sl.round === index);
+    const slot = this.slotForRound(index);
     if (!slot) return this.endGame(now);
     s.round = {
       index,
@@ -556,11 +669,12 @@ export class Game {
       guesses: {},
     };
     s.phase = 'countdown';
-    s.phaseEndsAt = slot.status === 'ready' && slot.readyAt !== null ? Math.max(now + COUNTDOWN_MS, slot.readyAt + MEDIA_SETTLE_MS) : null;
+    s.phaseEndsAt = slot.readyAt === null ? null : Math.max(now + COUNTDOWN_MS, slot.readyAt + MEDIA_SETTLE_MS);
   }
 
   guess(id: string, targetID: unknown, now: number) {
     this.require(id);
+    this.requireRunning();
     const s = this.state;
     const round = s.round;
     if (s.phase !== 'reveal' || !round || round.revealAt === null || round.endsAt === null) throw new GameError(409, 'There is nothing to guess right now.');
@@ -574,8 +688,11 @@ export class Game {
   }
 
   private finishIfEveryoneGuessed(now: number) {
-    const round = this.state.round;
-    if (this.state.phase !== 'reveal' || !round) return;
+    const s = this.state;
+    // A round must not finish while paused; resume runs this again.
+    if (this.paused) return;
+    const round = s.round;
+    if (s.phase !== 'reveal' || !round) return;
     const waiting = round.guessers.filter((g) => !round.guesses[g] && this.player(g)?.connected);
     if (!waiting.length) this.finishRound(now);
   }
@@ -609,17 +726,18 @@ export class Game {
     s.lastResult = { index: round.index, ownerID: round.ownerID, kind: round.kind ?? 'photo', rows: rankRound(rows).map(({ joinSeq: _, ...row }) => row) };
     // The round's media is no longer needed: the Durable Object drops the bytes.
     s.slots = s.slots.filter((sl) => sl.id !== round.slotID);
-    s.owned = { ...(s.owned ?? {}), [round.ownerID]: (s.owned?.[round.ownerID] ?? 0) + 1 };
+    s.owned = { ...s.owned, [round.ownerID]: (s.owned[round.ownerID] ?? 0) + 1 };
     s.lastOwnerID = round.ownerID;
     this.freedSlots.push(round.slotID);
     s.round = null;
     s.phase = 'results';
-    s.phaseEndsAt = now + RESULTS_MS;
+    s.phaseEndsAt = now + s.settings.breakSeconds * 1000;
   }
 
   /** Host skips the rest of the results pause. */
   advance(id: string, now: number) {
     this.requireHost(id);
+    this.requireRunning();
     if (this.state.phase !== 'results') throw new GameError(409, 'Nothing to skip right now.');
     this.state.phaseEndsAt = now;
     this.tick(now);
@@ -633,8 +751,46 @@ export class Game {
     this.endGame(now);
   }
 
+  // ---- pause ----
+  // The timing rules live in pause.ts; this is the game's policy around them.
+
+  /** Whether the host has frozen the phase clock. */
+  get paused() {
+    return this.state.pausedAt !== null;
+  }
+
+  /** Host freezes the current phase. Guests keep their seats and uploads still land. */
+  pause(id: string, now: number) {
+    this.requireHost(id);
+    const phase = this.state.phase;
+    if (this.paused) throw new GameError(409, 'The game is already paused.');
+    if (phase !== 'countdown' && phase !== 'reveal' && phase !== 'results') throw new GameError(409, 'There is nothing to pause right now.');
+    beginPause(this.state, now);
+    this.state.lastActivityAt = now;
+  }
+
+  /** Host unfreezes the phase, shifting round timers past the paused time. */
+  resume(id: string, now: number) {
+    this.requireHost(id);
+    if (!this.paused) throw new GameError(409, 'The game is not paused.');
+    this.resumeFromPause(now);
+  }
+
+  /** Shared by the host's resume and by a pause that timed out. */
+  private resumeFromPause(now: number) {
+    endPause(this.state, now, COUNTDOWN_MS);
+    this.state.lastActivityAt = now;
+    // A reveal may have lost its last waiting guesser while paused.
+    this.finishIfEveryoneGuessed(now);
+  }
+
+  private requireRunning() {
+    if (this.paused) throw new GameError(409, 'The game is paused.');
+  }
+
   private endGame(now: number) {
     const s = this.state;
+    clearPause(s);
     for (const slot of s.slots) this.freedSlots.push(slot.id);
     s.slots = [];
     s.round = null;
@@ -648,6 +804,7 @@ export class Game {
     this.requireHost(id);
     const s = this.state;
     if (s.phase !== 'podium') throw new GameError(409, 'Finish this game first.');
+    clearPause(s);
     s.phase = 'lobby';
     s.game += 1;
     s.lastResult = null;
@@ -658,6 +815,7 @@ export class Game {
   }
 
   close() {
+    clearPause(this.state);
     for (const slot of this.state.slots) this.freedSlots.push(slot.id);
     this.state.slots = [];
     this.state.round = null;
@@ -670,6 +828,8 @@ export class Game {
   /** Applies every timeout, transition, and cleanup that is due at `now`. */
   tick(now: number) {
     const s = this.state;
+    // A pause that outlives the host's patience ends by itself.
+    if (s.pausedAt !== null && now >= s.pausedAt + PAUSE_MAX_MS) this.resumeFromPause(now);
     // Re-pick timeouts are deadlines like any other.
     for (const slot of [...s.slots].filter((sl) => sl.status === 'requested' && now >= sl.requestedAt + UPLOAD_TIMEOUT_MS)) {
       if (!s.slots.includes(slot)) continue;
@@ -677,39 +837,53 @@ export class Game {
       this.reassign(slot, now);
     }
     for (let guard = 0; guard < 100 && s.phase !== 'closed'; guard++) {
+      // While paused there is no phase deadline, and nothing may advance.
+      if (this.paused) break;
       if (s.phaseEndsAt === null || now < s.phaseEndsAt) break;
-      const at = s.phaseEndsAt;
       if (s.phase === 'countdown' && s.round) {
         const round = s.round;
-        const slot = s.slots.find((sl) => sl.id === round.slotID);
+        const slot = this.slotForRound(round.index);
         if (!slot || slot.status !== 'ready') {
           // Still waiting for the upload; the timeout above will re-pick.
           s.phaseEndsAt = null;
           break;
         }
-        round.kind = slot.kind ?? 'photo';
-        round.revealAt = at;
-        round.endsAt = at + s.settings.timerSeconds * 1000;
+        // The reveal begins when this tick runs, not when the countdown was
+        // due: a late alarm (hibernation, deploy) must still give the round its
+        // full time rather than skipping it.
+        round.kind = slot.requiredKind;
+        round.revealAt = now;
+        round.endsAt = now + s.settings.timerSeconds * 1000;
         round.guessers = s.players.filter((p) => p.connected).map((p) => p.id);
         s.phase = 'reveal';
         s.phaseEndsAt = round.endsAt;
         // One round of lookahead: the next round's item is requested now.
-        if (round.index + 1 <= s.totalRounds && !s.slots.some((sl) => sl.round === round.index + 1)) this.createSlot(round.index + 1, at);
-        this.finishIfEveryoneGuessed(at);
+        if (round.index + 1 <= s.totalRounds && !this.slotForRound(round.index + 1)) this.createSlot(round.index + 1, now);
+        this.finishIfEveryoneGuessed(now);
       } else if (s.phase === 'reveal' && s.round) {
-        this.finishRound(at);
+        this.finishRound(now);
       } else if (s.phase === 'results') {
         const next = (s.lastResult?.index ?? 0) + 1;
-        if (next > s.totalRounds) this.endGame(at);
-        else this.beginRound(next, at);
+        if (next > s.totalRounds) this.endGame(now);
+        else this.beginRound(next, now);
       } else s.phaseEndsAt = null;
     }
     if (s.phase === 'closed') return;
+    const hostGrace = this.hostGraceDeadline();
+    if (hostGrace !== null && now >= hostGrace) this.transferHost();
     for (const p of [...s.players]) if (!p.connected && p.disconnectedAt !== null && now >= p.disconnectedAt + DISCONNECT_GRACE_MS) this.leave(p.id, now);
-    if ((s.phase as Phase) === 'closed') return;
+    if (this.state.phase === 'closed') return;
     if (s.emptySince !== null && now >= s.emptySince + EMPTY_ROOM_GRACE_MS) return this.close();
     const idle = this.idleDeadline();
     if (idle !== null && now >= idle) this.close();
+  }
+
+  /** When a dropped host's role moves on, if it still can (someone else is connected). */
+  private hostGraceDeadline() {
+    const s = this.state;
+    const host = this.player(s.hostID ?? '');
+    if (!host || host.connected || host.disconnectedAt === null) return null;
+    return s.players.some((p) => p.connected) ? host.disconnectedAt + HOST_GRACE_MS : null;
   }
 
   private idleDeadline() {
@@ -725,9 +899,11 @@ export class Game {
     if (s.phase === 'closed') return null;
     const times = [
       s.phaseEndsAt,
+      s.pausedAt === null ? null : s.pausedAt + PAUSE_MAX_MS,
       s.emptySince === null ? null : s.emptySince + EMPTY_ROOM_GRACE_MS,
       this.idleDeadline(),
       ...s.players.map((p) => (p.connected || p.disconnectedAt === null ? null : p.disconnectedAt + DISCONNECT_GRACE_MS)),
+      this.hostGraceDeadline(),
       ...s.slots.filter((slot) => slot.status === 'requested').map((slot) => slot.requestedAt + UPLOAD_TIMEOUT_MS),
     ].filter((t): t is number => t !== null);
     return times.length ? Math.min(...times) : null;
@@ -749,6 +925,8 @@ export class Game {
       settings: s.settings,
       serverNow: now,
       phaseEndsAt: s.phaseEndsAt,
+      paused: this.paused,
+      pausedRemainingMs: s.pausedRemainingMs,
       startBlocker: s.phase === 'lobby' ? this.startBlocker(viewerID) : null,
       players: [...s.players]
         .sort((a, b) => a.joinSeq - b.joinSeq)
@@ -766,7 +944,9 @@ export class Game {
       you: { id: viewerID },
       round:
         round && s.phase === 'countdown'
-          ? { index: round.index, total: s.totalRounds, waiting: s.phaseEndsAt === null }
+          ? // `waiting` is about the media, not the clock: a paused countdown
+            // whose upload already landed is not "Shuffling…".
+            { index: round.index, total: s.totalRounds, waiting: this.slotForRound(round.index)?.status !== 'ready' }
           : round && s.phase === 'reveal'
             ? {
                 index: round.index,

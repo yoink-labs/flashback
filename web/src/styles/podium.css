@@ -1,0 +1,169 @@
+/* Podium and confetti. */
+
+/* ---- podium ---- */
+
+.podium-screen {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 0;
+  overflow: clip;
+}
+
+.podium-body {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+}
+
+.podium-title {
+  font-size: 32px;
+  text-align: center;
+}
+
+.podium-stage {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.podium-col {
+  flex: 1;
+  max-width: 132px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.podium-col.empty {
+  min-height: 0;
+}
+
+.podium-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.podium-score {
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.podium-block {
+  width: 100%;
+  height: 56px;
+  display: flex;
+  justify-content: center;
+  padding-top: 8px;
+  border-radius: 14px 14px 0 0;
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.podium-col.rank-1 .podium-block {
+  height: 92px;
+  border-top: 4px solid var(--gold);
+}
+
+.podium-col.rank-2 .podium-block {
+  height: 64px;
+}
+
+.podium-col.rank-3 .podium-block {
+  height: 44px;
+}
+
+.podium-rest {
+  width: 100%;
+  max-width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.podium-rest li {
+  display: grid;
+  grid-template-columns: 24px 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+}
+
+.podium-rest-rank {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-3);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.podium-rest-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.podium-rest-score {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.podium-actions .caption {
+  color: var(--text-2);
+  text-align: center;
+  padding: 8px 0;
+}
+
+.confetti {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.confetti span {
+  position: absolute;
+  top: -14px;
+  border-radius: 2px;
+  opacity: 0;
+  animation-name: confetti-fall;
+  animation-timing-function: ease-in;
+  animation-fill-mode: forwards;
+}
+
+@keyframes confetti-fall {
+  0% {
+    opacity: 1;
+    transform: translateY(0) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(105vh) rotate(560deg);
+  }
+}

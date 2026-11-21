@@ -1,0 +1,229 @@
+/* Lobby: code, players, settings row and the pinned primary action. */
+
+/* ---- lobby ---- */
+
+.lobby {
+  position: relative;
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto;
+  flex: 1;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: calc(16px + env(safe-area-inset-top)) calc(var(--pad) + env(safe-area-inset-right)) 0 calc(var(--pad) + env(safe-area-inset-left));
+}
+
+.lobby-room {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.lobby-top {
+  position: absolute;
+  top: 4px;
+  left: -10px;
+  z-index: 2;
+}
+
+.lobby-code {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.code-hero {
+  font-size: clamp(44px, 13vw, 56px);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0.12em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  padding: 0 0 0 0.12em;
+  min-height: 52px;
+}
+
+.code-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pill-btn {
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.pill-btn svg {
+  color: var(--text-2);
+}
+
+.pill-btn.on {
+  background: var(--surface-2);
+}
+
+.qr {
+  width: 168px;
+  height: 168px;
+  border-radius: var(--radius);
+}
+
+.players-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: safe center;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 4px 4px;
+  margin: 0 -4px;
+  scrollbar-width: none;
+}
+
+.players-row::-webkit-scrollbar {
+  display: none;
+}
+
+.player-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  width: 64px;
+}
+
+.avatar-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.crown {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--gold);
+  color: var(--bg);
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+.player-chip-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.player-chip.offline .player-chip-name {
+  color: var(--text-3);
+}
+
+.player-add {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 2px dashed var(--line);
+  color: var(--text-2);
+  display: grid;
+  place-items: center;
+}
+
+.invite-chip .player-chip-name {
+  color: var(--text-3);
+}
+
+.settings-row {
+  width: 100%;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.settings-row > svg {
+  flex: none;
+  color: var(--text-2);
+}
+
+.settings-row > svg:last-child {
+  color: var(--text-3);
+}
+
+.settings-row-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-row.static {
+  color: var(--text-2);
+}
+
+/* The one primary action, pinned in the thumb zone. Sticky (not fixed) so it
+   never covers the end of the content; its divider spans the content width. */
+.lobby-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 30;
+  margin: auto 0 0;
+  padding: 12px 0 calc(16px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  box-shadow: 0 0 0 100vmax var(--bg);
+  clip-path: inset(0 -100vmax -100vmax -100vmax);
+}
+
+.lobby-bar::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--line);
+}
+
+.lobby-bar-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.lobby-bar .btn {
+  width: 100%;
+  max-width: 400px;
+}
+
+.blocker {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: center;
+}

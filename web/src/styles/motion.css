@@ -1,0 +1,21 @@
+/* Reduced motion. Last, so it wins. */
+
+/* ---- motion ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .confetti,
+  .ring svg {
+    display: none;
+  }
+  /* A draining progress bar is information, not decoration: keep its timing. */
+  .drain span {
+    animation-duration: var(--duration), 0.01ms !important;
+  }
+}

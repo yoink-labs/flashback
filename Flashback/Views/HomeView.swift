@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Wordmark, one line, your name, and the two doors. Sign-in is a small text
-/// button top-right; guests need only a name.
+/// Wordmark, one line, your name, and the two doors. The top bar holds the tip
+/// pill, About and Sign in at one height; guests need only a name.
 struct HomeView: View {
     @EnvironmentObject private var room: RoomStore
     @EnvironmentObject private var account: AccountStore
@@ -18,7 +18,77 @@ struct HomeView: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
+        KeyboardStableLayout { layout, proxy in
+            if layout.isWide {
+                wide
+            } else {
+                compact(proxy)
+            }
+        }
+        .background(Palette.bg.ignoresSafeArea())
+        .modifier(HomeSheets(signingIn: $signingIn, tipping: $tipping, showingAbout: $showingAbout))
+        .onAppear {
+            if room.draftNickname.isEmpty { room.draftNickname = lastName }
+            #if DEBUG
+            // Screenshot routes: -uiRoute tipJar | about | join
+            switch TipDebugLaunch.value("uiRoute") {
+            case "tipJar": tipping = true
+            case "about": showingAbout = true
+            case "join":
+                room.draftCode = "GV82"
+                room.showJoin = true
+            default: break
+            }
+            #endif
+        }
+        .onChange(of: room.draftNickname) { _, value in
+            lastName = value
+        }
+        .onChange(of: account.displayName, initial: true) { _, name in
+            if room.draftNickname.isEmpty && !name.isEmpty { room.draftNickname = name }
+        }
+    }
+
+    /// Inner display / landscape: the hero in the leading pane, the name and the
+    /// two doors in the trailing pane (thumb side), nothing in the fold.
+    private var wide: some View {
+        TwoPane { _ in
+            VStack(spacing: 0) {
+                HStack {
+                    TipTheDevsButton { tipping = true }
+                    Spacer(minLength: 0)
+                }
+                Spacer(minLength: 16)
+                hero
+                Spacer(minLength: 16)
+            }
+            .padding(.leading, Spacing.pageWide)
+            .padding(.vertical, 12)
+        } trailing: { pane in
+            ScrollView {
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Spacer(minLength: 0)
+                        aboutButton
+                        accountButton
+                    }
+                    Spacer(minLength: 24)
+                    actions
+                    errorText
+                    Spacer(minLength: 24)
+                    footer
+                }
+                .frame(maxWidth: 400)
+                .frame(maxWidth: .infinity, minHeight: max(0, pane.height - 24))
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDismissesKeyboard(.interactively)
+            .padding(.trailing, Spacing.pageWide)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private func compact(_ proxy: GeometryProxy) -> some View {
             ScrollViewReader { scroller in
                 ScrollView {
                     VStack(spacing: 0) {
@@ -28,22 +98,13 @@ struct HomeView: View {
                         actions
                             .id("actions")
                             .padding(.top, Spacing.section)
-                        if let error = room.error {
-                            Text(error)
-                                .font(.flCaption)
-                                .foregroundStyle(Palette.bad)
-                                .multilineTextAlignment(.center)
-                                .padding(.top, 12)
-                                .accessibilityIdentifier("error")
-                        }
+                        errorText
                         Spacer(minLength: 24)
-                        Text("Free · no account · nothing is kept")
-                            .font(.flCaption)
-                            .foregroundStyle(Palette.text3)
-                            .multilineTextAlignment(.center)
+                        footer
                     }
                     .padding(.horizontal, Spacing.pageCompact)
-                    .padding(.vertical, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 16)
                     .frame(maxWidth: 440)
                     .frame(maxWidth: .infinity, minHeight: proxy.size.height)
                 }
@@ -58,39 +119,24 @@ struct HomeView: View {
                     }
                 }
             }
+    }
+
+    @ViewBuilder private var errorText: some View {
+        if let error = room.error {
+            Text(error)
+                .font(.flCaption)
+                .foregroundStyle(Palette.bad)
+                .multilineTextAlignment(.center)
+                .padding(.top, 12)
+                .accessibilityIdentifier("error")
         }
-        .background(Palette.bg.ignoresSafeArea())
-        .sheet(isPresented: $signingIn) {
-            SignInView().environmentObject(account)
-        }
-        .sheet(isPresented: $tipping) {
-            TipJarView(store: .shared)
-        }
-        .sheet(isPresented: $showingAbout) {
-            AboutView()
-        }
-        .fullScreenCover(isPresented: $room.showJoin) {
-            JoinView()
-                .environmentObject(room)
-                .environmentObject(account)
-        }
-        .onAppear {
-            if room.draftNickname.isEmpty { room.draftNickname = lastName }
-            #if DEBUG
-            // Screenshot routes: -uiRoute tipJar | about
-            switch TipDebugLaunch.value("uiRoute") {
-            case "tipJar": tipping = true
-            case "about": showingAbout = true
-            default: break
-            }
-            #endif
-        }
-        .onChange(of: room.draftNickname) { _, value in
-            lastName = value
-        }
-        .onChange(of: account.displayName, initial: true) { _, name in
-            if room.draftNickname.isEmpty && !name.isEmpty { room.draftNickname = name }
-        }
+    }
+
+    private var footer: some View {
+        Text("Free · no account · nothing is kept")
+            .font(.flCaption)
+            .foregroundStyle(Palette.text3)
+            .multilineTextAlignment(.center)
     }
 
     // MARK: - Pieces
@@ -147,41 +193,46 @@ struct HomeView: View {
         }
     }
 
-    /// Top bar: the pink "Tip the devs" capsule on the left; About and the
-    /// account on the right. Same on every size class, guests included.
-    @ViewBuilder private var accountRow: some View {
-        HStack(spacing: 4) {
+    /// Top bar: "Tip the devs" on the leading side; About and the account on
+    /// the trailing side. All three are 36-pt items (44-pt hit areas) on one
+    /// centre line, so nothing looks crammed or mismatched.
+    private var accountRow: some View {
+        HStack(spacing: 8) {
             TipTheDevsButton { tipping = true }
             Spacer(minLength: 8)
-            Button {
-                showingAbout = true
-            } label: {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(Palette.text2)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("About Flashback")
-            .accessibilityIdentifier("about-button")
-            if account.signedIn {
-                Menu {
-                    Button("Sign out", role: .destructive) { Task { await account.signOut() } }
-                } label: {
-                    Text(account.displayName.isEmpty ? "Account" : account.displayName)
-                        .font(.fl(15, .semibold))
-                        .foregroundStyle(Palette.text2)
-                        .lineLimit(1)
-                }
-                .accessibilityLabel("Signed in as \(account.displayName)")
-            } else {
-                Button("Sign in") { signingIn = true }
-                    .buttonStyle(.text)
-                    .accessibilityIdentifier("sign-in")
-            }
+            aboutButton
+            accountButton
         }
         .frame(height: 44)
+    }
+
+    private var aboutButton: some View {
+        Button {
+            showingAbout = true
+        } label: {
+            Label("About Flashback", systemImage: "info")
+        }
+        .buttonStyle(.icon)
+        .accessibilityIdentifier("about-button")
+    }
+
+    @ViewBuilder private var accountButton: some View {
+        if account.signedIn {
+            Menu {
+                Button("Sign out", role: .destructive) { Task { await account.signOut() } }
+            } label: {
+                TopBarCapsule(title: account.displayName.isEmpty ? "Account" : account.displayName, symbol: "person.crop.circle.fill")
+            }
+            .accessibilityLabel("Signed in as \(account.displayName)")
+        } else {
+            Button {
+                signingIn = true
+            } label: {
+                TopBarCapsule(title: "Sign in", symbol: "person.crop.circle")
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("sign-in")
+        }
     }
 
     private var nicknameBinding: Binding<String> {
@@ -197,5 +248,55 @@ struct HomeView: View {
             return
         }
         await room.create(nickname: name, clerkToken: account.signedIn ? await account.token() : nil)
+    }
+}
+
+/// A 36-pt surface capsule with a symbol and a short title, matching the
+/// "Tip the devs" pill and the About circle in height.
+private struct TopBarCapsule: View {
+    var title: String
+    var symbol: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+            Text(title)
+                .font(.fl(15, .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(Palette.text)
+        .padding(.horizontal, 14)
+        .frame(height: 36)
+        .background(Palette.surface, in: Capsule())
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+        .fixedSize()
+    }
+}
+
+private struct HomeSheets: ViewModifier {
+    @EnvironmentObject private var room: RoomStore
+    @EnvironmentObject private var account: AccountStore
+    @Binding var signingIn: Bool
+    @Binding var tipping: Bool
+    @Binding var showingAbout: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $signingIn) {
+                SignInView().environmentObject(account)
+            }
+            .sheet(isPresented: $tipping) {
+                TipJarView(store: .shared)
+            }
+            .sheet(isPresented: $showingAbout) {
+                AboutView()
+            }
+            .fullScreenCover(isPresented: $room.showJoin) {
+                JoinView()
+                    .environmentObject(room)
+                    .environmentObject(account)
+            }
     }
 }

@@ -57,6 +57,11 @@ enum MediaLibrary {
         return picks
     }
 
+    /// Random assets of one kind (photos, or videos of at least a second).
+    static func randomAssets(kind: MediaKind, count: Int, excluding: Set<String> = []) -> [PHAsset] {
+        randomAssets(mode: kind == .photo ? .photos : .videos, count: count, excluding: excluding)
+    }
+
     static func asset(id: String) -> PHAsset? {
         PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
     }

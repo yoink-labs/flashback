@@ -71,16 +71,19 @@ struct SecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// The small secondary capsules used for Share / QR and deck actions.
+/// The small secondary capsules used for Share / QR. `fill` makes a row of
+/// them share the width equally, so they are the same size.
 struct CapsuleButtonStyle: ButtonStyle {
+    var fill = false
     @Environment(\.isEnabled) private var enabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.fl(15, .semibold))
+            .labelStyle(CapsuleLabelStyle())
             .lineLimit(1)
-            .padding(.horizontal, 18)
-            .frame(minHeight: 40)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: fill ? .infinity : nil, minHeight: 44)
             .foregroundStyle(enabled ? Palette.text : Palette.text3)
             .background(Palette.surface, in: Capsule())
             .contentShape(Capsule())
@@ -113,6 +116,186 @@ extension ButtonStyle where Self == SecondaryButtonStyle {
 
 extension ButtonStyle where Self == CapsuleButtonStyle {
     static var capsule: CapsuleButtonStyle { CapsuleButtonStyle() }
+    static var capsuleFill: CapsuleButtonStyle { CapsuleButtonStyle(fill: true) }
+}
+
+/// Icon + title with a fixed icon gap, so capsules in a row line up.
+struct CapsuleLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 7) {
+            configuration.icon.font(.system(size: 14, weight: .semibold))
+            configuration.title
+        }
+    }
+}
+
+/// A 36-pt surface circle with one symbol (44-pt hit area). Used for small
+/// actions next to a heading, such as New bunch.
+struct IconButtonStyle: ButtonStyle {
+    var size: CGFloat = 36
+    /// Highlights the one action to take next (accent glyph and ring).
+    var emphasized = false
+    @Environment(\.isEnabled) private var enabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .labelStyle(.iconOnly)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(!enabled ? Palette.text3 : emphasized ? Palette.accent : Palette.text)
+            .frame(width: size, height: size)
+            .background(Palette.surface, in: Circle())
+            .overlay {
+                if emphasized { Circle().strokeBorder(Palette.accent, lineWidth: 1.5).frame(width: size, height: size) }
+            }
+            .frame(width: max(44, size), height: max(44, size))
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.7 : 1)
+    }
+}
+
+extension ButtonStyle where Self == IconButtonStyle {
+    static var icon: IconButtonStyle { IconButtonStyle() }
+}
+
+/// 44-pt translucent circle that sits on media (mute, save).
+struct MediaCircleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .labelStyle(.iconOnly)
+            .font(.system(size: 16, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 44, height: 44)
+            .background(.black.opacity(configuration.isPressed ? 0.7 : 0.5), in: Circle())
+            .contentShape(Circle())
+    }
+}
+
+extension ButtonStyle where Self == MediaCircleButtonStyle {
+    static var mediaCircle: MediaCircleButtonStyle { MediaCircleButtonStyle() }
+}
+
+/// Save this round's photo or clip to Photos (reveal and results).
+struct SaveMediaButton: View {
+    @EnvironmentObject private var room: RoomStore
+
+    var body: some View {
+        if room.canSave {
+            Button {
+                Task { await room.saveCurrentMedia() }
+            } label: {
+                if room.saving {
+                    ProgressView().tint(.white)
+                } else {
+                    Label("Save to Photos", systemImage: "square.and.arrow.down")
+                }
+            }
+            .buttonStyle(.mediaCircle)
+            .disabled(room.saving)
+            .accessibilityLabel("Save to Photos")
+            .accessibilityIdentifier("save-media")
+        }
+    }
+}
+
+// MARK: - Layout
+
+/// The one way screens pick a `RoomLayout` (Home, Join, the room). Reads the
+/// available size like `GeometryReader`, but picks the `RoomLayout`
+/// from the size the screen has without the keyboard. On the folded iPhone Duo
+/// the keyboard leaves the cover wider than tall, which `forSize` calls wide;
+/// switching panes there destroyed the focused text field, so typing a name or
+/// a code on the cover was impossible.
+struct KeyboardStableLayout<Content: View>: View {
+    private let content: (RoomLayout, GeometryProxy) -> Content
+    @State private var fullSize: CGSize?
+
+    init(@ViewBuilder content: @escaping (RoomLayout, GeometryProxy) -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            content(RoomLayout.forSize(fullSize ?? proxy.size), proxy)
+        }
+        .background {
+            GeometryReader { full in
+                Color.clear
+                    .onAppear { fullSize = full.size }
+                    .onChange(of: full.size) { _, size in fullSize = size }
+            }
+            .ignoresSafeArea(.keyboard)
+        }
+    }
+}
+
+/// Two panes that meet at the fold (see `PaneSplit`). On iOS 27.1+ the split
+/// follows the iPhone Duo division region (read with `includeInactive`, so the
+/// layout already clears the fold before the device bends); elsewhere the width
+/// is halved. The gap between the panes straddles the fold, so nothing either
+/// pane draws is in the curve.
+struct TwoPane<Leading: View, Trailing: View>: View {
+    @ViewBuilder var leading: (CGSize) -> Leading
+    @ViewBuilder var trailing: (CGSize) -> Trailing
+
+    var body: some View {
+        GeometryReader { proxy in
+            let split = PaneSplit.make(width: proxy.size.width, fold: Self.fold(proxy))
+            let height = proxy.size.height
+            HStack(spacing: 0) {
+                leading(CGSize(width: split.leading, height: height))
+                    .frame(width: split.leading, height: height)
+                Color.clear
+                    .frame(width: split.gap, height: height)
+                    .allowsHitTesting(false)
+                trailing(CGSize(width: split.trailing, height: height))
+                    .frame(width: split.trailing, height: height)
+            }
+        }
+    }
+
+    static func fold(_ proxy: GeometryProxy) -> CGRect? {
+        if #available(iOS 27.1, *) {
+            let regions = proxy.reservedRegions(kind: .division, options: .includeInactive)
+            return (regions.first { $0.isActive } ?? regions.first)?.frame
+        }
+        return nil
+    }
+}
+
+// MARK: - Toast
+
+struct ToastView: View {
+    var toast: Toast
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: toast.symbol)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(toast.isError ? Palette.bad : Palette.good)
+                .accessibilityHidden(true)
+            Text(toast.text)
+                .font(.fl(15, .semibold))
+                .foregroundStyle(Palette.text)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            if toast.action == .openSettings, let url = URL(string: UIApplication.openSettingsURLString) {
+                Button("Settings") { openURL(url) }
+                    .font(.fl(15, .bold))
+                    .foregroundStyle(Palette.accent)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("toast-settings")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 4)
+        .frame(minHeight: 44)
+        .background(Palette.surface2, in: Capsule())
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+        .accessibilityElement(children: toast.action == nil ? .combine : .contain)
+        .accessibilityAddTraits(.updatesFrequently)
+        .onAppear { UIAccessibility.post(notification: .announcement, argument: toast.text) }
+    }
 }
 
 extension ButtonStyle where Self == TextButtonStyle {

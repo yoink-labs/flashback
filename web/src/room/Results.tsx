@@ -4,7 +4,10 @@ import { useEffect, useState } from 'react';
 import type { ResultRow, RoomView } from '../types';
 import { Avatar, playerColor, playerIndex } from '../ui/Avatar';
 import { CheckIcon, CrossIcon } from '../ui/Icons';
+import { SaveButton } from '../ui/SaveButton';
 import { mediaKey, type RoomController } from '../useRoom';
+import { clockOf, DrainBar, GameBar, useSecondsLeft, type Clock } from './Timing';
+import { usePlayback } from './usePlayback';
 
 interface Standing {
   playerID: string;
@@ -15,6 +18,12 @@ interface Standing {
   movement: number;
 }
 
+export const ordinal = (n: number) => {
+  const tens = n % 100;
+  if (tens >= 11 && tens <= 13) return `${n}th`;
+  return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
+};
+
 export function Results({ view, room, isHost }: { view: RoomView; room: RoomController; isHost: boolean }) {
   const result = view.lastResult;
   if (!result) return <p className="caption center-text">Working out the scores…</p>;
@@ -24,33 +33,42 @@ export function Results({ view, room, isHost }: { view: RoomView; room: RoomCont
   const myRow = result.rows.find((row) => row.playerID === view.you.id);
   const mine = result.ownerID === view.you.id;
   const standings = buildStandings(view, result.rows);
+  const me = standings.find((standing) => standing.playerID === view.you.id);
   const total = view.round?.total ?? view.settings.rounds;
   const final = result.index >= total;
   const ownerName = owner?.nickname ?? 'someone who left';
   const ownerColor = owner ? playerColor(playerIndex(view, owner.id)) : undefined;
+  const clock = clockOf(view, view.phaseEndsAt, room.serverNow);
 
   return (
-    <section className="screen results-screen">
+    <section className="screen game-screen results-screen">
       <p className="sr-only" aria-live="polite">
         It was {ownerName}’s. {mine ? 'It was yours.' : myRow ? (myRow.correct ? `You got it, plus ${myRow.points} points.` : 'You did not get it.') : ''}{' '}
-        {standings[0] ? `${standings[0].nickname} leads with ${standings[0].score}.` : ''}
+        {me ? `You are ${ordinal(me.rank)} of ${standings.length} with ${me.score}.` : ''}
       </p>
 
+      <GameBar view={view} isHost={isHost} send={room.send} label={`Round ${result.index} of ${total}`} />
+      <DrainBar clock={clock} totalMs={view.settings.breakSeconds * 1000} className="next-bar" />
+
       <header className="result-hero">
-        <p className="caption">
-          Round {result.index} of {total}
-        </p>
-        <Avatar name={ownerName} colorIndex={owner ? playerIndex(view, owner.id) : 0} size="xl" gold />
-        <h1 className="title result-title">
-          It was <span style={{ color: ownerColor }}>{ownerName}</span>’s
-        </h1>
-        <Outcome row={myRow} mine={mine} rows={result.rows} ownerID={result.ownerID} />
-        {entry && (
-          <div className="result-thumb" aria-hidden="true">
-            {entry.kind === 'video' ? <video src={entry.url} muted loop autoPlay playsInline /> : <img src={entry.url} alt="" />}
-          </div>
-        )}
+        <div className="result-media">
+          {entry ? (
+            entry.kind === 'video' ? <ResultVideo url={entry.url} paused={view.paused} /> : <img src={entry.url} alt="" />
+          ) : (
+            <span className="result-media-empty" />
+          )}
+          <SaveButton entry={entry} round={result.index} className="on-media" />
+        </div>
+        <div className="result-who">
+          <Avatar name={ownerName} colorIndex={owner ? playerIndex(view, owner.id) : 0} size="md" gold />
+          <h1 className="title result-title">
+            It was <span style={{ color: ownerColor }}>{ownerName}</span>’s
+          </h1>
+          {mine && <p className="caption result-owner-line">{ownerLine(result.rows, result.ownerID)}</p>}
+        </div>
       </header>
+
+      {me && <YouCard me={me} row={myRow} mine={mine} players={standings.length} />}
 
       <ol className="result-list">
         {standings.map((standing) => (
@@ -60,15 +78,47 @@ export function Results({ view, room, isHost }: { view: RoomView; room: RoomCont
 
       <div className="result-foot">
         {isHost ? (
-          <button type="button" className="btn primary action-btn" onClick={() => room.send({ type: 'advance' })}>
-            Next
+          <button type="button" className="btn primary action-btn" onClick={() => room.send({ type: 'advance' })} disabled={view.paused} data-testid="next">
+            {final ? 'Final scores' : 'Next round'}
           </button>
         ) : (
-          <NextIn endsAt={view.phaseEndsAt} serverNow={room.serverNow} final={final} />
+          <NextIn clock={clock} final={final} />
         )}
       </div>
     </section>
   );
+}
+
+/** Your rank, this round's points, movement and total, in one line of big numbers. */
+function YouCard({ me, row, mine, players }: { me: Standing; row: ResultRow | undefined; mine: boolean; players: number }) {
+  const points = !mine && row?.correct ? row.points : 0;
+  const move = mine ? 0 : me.movement;
+  return (
+    <div className="you-card" data-testid="you-card">
+      <div className="you-stat">
+        <span className="you-value">
+          {ordinal(me.rank)}
+          <span className="you-of"> of {players}</span>
+        </span>
+        <span className={`you-label${move > 0 ? ' good' : move < 0 ? ' bad' : ''}`}>
+          {move > 0 ? `▲ ${move}` : move < 0 ? `▼ ${-move}` : `Held ${ordinal(me.rank)}`}
+        </span>
+      </div>
+      <div className="you-stat">
+        <span className={`you-value${points > 0 ? ' good' : ' muted'}`}>{points > 0 ? <>+<Points value={points} /></> : mine ? 'Yours' : 'No points'}</span>
+        <span className="you-label">{row?.streak && row.streak >= 2 && points > 0 ? `This round · ${row.streak} in a row` : 'This round'}</span>
+      </div>
+      <div className="you-stat">
+        <span className="you-value">{me.score.toLocaleString()}</span>
+        <span className="you-label">Total</span>
+      </div>
+    </div>
+  );
+}
+
+function ResultVideo({ url, paused }: { url: string; paused: boolean }) {
+  const video = usePlayback(paused);
+  return <video ref={video} src={url} muted loop autoPlay={!paused} playsInline />;
 }
 
 /** "Yours" line for the owner: how many of the others spotted it. */
@@ -78,18 +128,6 @@ export function ownerLine(rows: ResultRow[], ownerID: string) {
   if (!others.length || spotted === 0) return 'Yours. Nobody knew 😉';
   if (spotted === others.length) return 'Yours. Everyone knew';
   return `Yours. ${spotted} of ${others.length} knew`;
-}
-
-function Outcome({ row, mine, rows, ownerID }: { row: ResultRow | undefined; mine: boolean; rows: ResultRow[]; ownerID: string }) {
-  if (mine) return <p className="result-outcome">{ownerLine(rows, ownerID)}</p>;
-  if (!row) return <p className="result-outcome">Missed it</p>;
-  if (!row.correct) return <p className="result-outcome">Missed it</p>;
-  return (
-    <p className="result-outcome good">
-      +<Points value={row.points} />
-      {row.streak >= 2 && <span className="result-streak"> · {row.streak} in a row</span>}
-    </p>
-  );
 }
 
 function ResultRowLine({ view, standing, row, ownerID }: { view: RoomView; standing: Standing; row: ResultRow | undefined; ownerID: string }) {
@@ -140,21 +178,11 @@ function Movement({ movement }: { movement: number }) {
   );
 }
 
-function NextIn({ endsAt, serverNow, final }: { endsAt: number | null; serverNow: () => number; final: boolean }) {
-  const [left, setLeft] = useState(() => (endsAt === null ? 0 : Math.max(0, Math.ceil((endsAt - serverNow()) / 1000))));
-  useEffect(() => {
-    if (endsAt === null) return;
-    const update = () => setLeft((previous) => {
-      const next = Math.max(0, Math.ceil((endsAt - serverNow()) / 1000));
-      return previous === next ? previous : next;
-    });
-    update();
-    const timer = setInterval(update, 250);
-    return () => clearInterval(timer);
-  }, [endsAt, serverNow]);
+function NextIn({ clock, final }: { clock: Clock; final: boolean }) {
+  const left = useSecondsLeft(clock);
   return (
     <p className="caption result-next" aria-live="polite">
-      {final ? 'Final scores' : 'Next round'} in {left}
+      {clock.paused ? 'Paused' : `${final ? 'Final scores' : 'Next round'} in ${left}`}
     </p>
   );
 }

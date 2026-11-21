@@ -1,32 +1,44 @@
 // The round itself: the media is the hero, the guess grid sits under it, and
 // nothing is boxed. Nothing on this screen differs for the owner.
-import { memo, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { RoomView } from '../types';
 import { Avatar } from '../ui/Avatar';
+import { SpeakerOffIcon, SpeakerOnIcon } from '../ui/Icons';
+import { SaveButton } from '../ui/SaveButton';
 import { mediaKey, type MediaEntry, type RoomController } from '../useRoom';
+import { clockOf, DrainBar, PauseButton, useSecondsLeft, type Clock } from './Timing';
+import { usePlayback } from './usePlayback';
 
 const MUTE_KEY = 'flashback.muted';
 
-export function Reveal({ view, room }: { view: RoomView; room: RoomController }) {
+export function Reveal({ view, room, isHost }: { view: RoomView; room: RoomController; isHost: boolean }) {
   const round = view.round;
   if (!round) return null;
   const entry = room.media[mediaKey(view.game, round.index)];
-  const endsAt = round.endsAt ?? room.serverNow();
+  const endsAt = round.endsAt ?? view.phaseEndsAt;
+  const clock = clockOf(view, endsAt, room.serverNow);
+  const total = endsAt !== null && round.revealAt !== undefined ? Math.max(1, endsAt - round.revealAt) : view.settings.timerSeconds * 1000;
 
   return (
     <div className="reveal-screen">
-      <TimerBar key={round.index} endsAt={endsAt} revealAt={round.revealAt ?? endsAt} serverNow={room.serverNow} />
+      <DrainBar clock={clock} totalMs={total} warnMs={5000} className="timerbar" />
 
       <div className="reveal-media">
-        <Media entry={entry} kind={round.kind ?? 'photo'} />
+        <Media entry={entry} kind={round.kind ?? 'photo'} paused={view.paused} />
+        <div className="media-tools top">
+          <PauseButton view={view} isHost={isHost} send={room.send} className="on-media" />
+        </div>
+        <div className="media-tools bottom-left">
+          <SaveButton entry={entry} round={round.index} className="on-media" />
+        </div>
       </div>
 
       <div className="reveal-side">
         <div className="reveal-meta">
           <span className="caption">
-            {round.index}/{round.total}
+            Round {round.index} of {round.total}
           </span>
-          <Seconds endsAt={endsAt} serverNow={room.serverNow} />
+          <Seconds clock={clock} />
         </div>
         <GuessPanel view={view} room={room} />
       </div>
@@ -34,45 +46,12 @@ export function Reveal({ view, room }: { view: RoomView; room: RoomController })
   );
 }
 
-/** The 4-pt line that drains over the round; the last 5 seconds turn red. */
-const TimerBar = memo(function TimerBar({ endsAt, revealAt, serverNow }: { endsAt: number; revealAt: number; serverNow: () => number }) {
-  const total = Math.max(1, endsAt - revealAt);
-  const [remaining, setRemaining] = useState(() => Math.max(0, Math.min(total, endsAt - serverNow())));
-
-  useEffect(() => {
-    const update = () => setRemaining(Math.max(0, Math.min(total, endsAt - serverNow())));
-    update();
-    const timer = setInterval(update, 120);
-    return () => clearInterval(timer);
-  }, [endsAt, total, serverNow]);
-
-  return (
-    <div className={`timerbar${remaining <= 5000 ? ' ending' : ''}`} aria-hidden="true">
-      <span style={{ width: `${(remaining / total) * 100}%` }} />
-    </div>
-  );
-});
-
-function Seconds({ endsAt, serverNow }: { endsAt: number; serverNow: () => number }) {
-  const left = useSecondsLeft(endsAt, serverNow);
-  return <span className="caption seconds">{left}</span>;
+function Seconds({ clock }: { clock: Clock }) {
+  const left = useSecondsLeft(clock);
+  return <span className="caption seconds">{left}s</span>;
 }
 
-function useSecondsLeft(endsAt: number, serverNow: () => number) {
-  const [left, setLeft] = useState(() => Math.max(0, Math.ceil((endsAt - serverNow()) / 1000)));
-  useEffect(() => {
-    const update = () => setLeft((previous) => {
-      const next = Math.max(0, Math.ceil((endsAt - serverNow()) / 1000));
-      return previous === next ? previous : next;
-    });
-    update();
-    const timer = setInterval(update, 200);
-    return () => clearInterval(timer);
-  }, [endsAt, serverNow]);
-  return left;
-}
-
-function Media({ entry, kind }: { entry: MediaEntry | undefined; kind: 'photo' | 'video' }) {
+function Media({ entry, kind, paused }: { entry: MediaEntry | undefined; kind: 'photo' | 'video'; paused: boolean }) {
   const [slow, setSlow] = useState(false);
 
   useEffect(() => {
@@ -97,12 +76,12 @@ function Media({ entry, kind }: { entry: MediaEntry | undefined; kind: 'photo' |
     );
   }
 
-  if (kind === 'video' || entry.kind === 'video') return <VideoMedia entry={entry} />;
+  if (kind === 'video' || entry.kind === 'video') return <VideoMedia entry={entry} paused={paused} />;
   return <img className="media" src={entry.url} alt="Whose camera roll is this from?" draggable={false} />;
 }
 
-/** Exposed for the reveal's `needMedia` nudge. */
-export function useMediaRequest(room: RoomController, view: RoomView, entry: MediaEntry | undefined) {
+/** Asks the server to resend the round's media once if it hasn't arrived. */
+function useMediaRequest(room: RoomController, view: RoomView, entry: MediaEntry | undefined) {
   const asked = useRef<string | null>(null);
   const key = mediaKey(view.game, view.round?.index ?? 0);
   useEffect(() => {
@@ -112,8 +91,8 @@ export function useMediaRequest(room: RoomController, view: RoomView, entry: Med
   }, [entry, key, room.send, view.round]);
 }
 
-function VideoMedia({ entry }: { entry: MediaEntry }) {
-  const video = useRef<HTMLVideoElement>(null);
+function VideoMedia({ entry, paused }: { entry: MediaEntry; paused: boolean }) {
+  const video = usePlayback(paused);
   const [muted, setMuted] = useState(true);
 
   // Remember the choice across rounds, but only switch sound on once playback
@@ -145,9 +124,9 @@ function VideoMedia({ entry }: { entry: MediaEntry }) {
 
   return (
     <>
-      <video ref={video} className="media" src={entry.url} autoPlay loop playsInline muted={muted} onCanPlay={(event) => void event.currentTarget.play().catch(() => {})} />
-      <button type="button" className="mute-btn" onClick={toggle} aria-pressed={!muted} aria-label={muted ? 'Turn sound on' : 'Mute the video'}>
-        {muted ? <SpeakerOff /> : <SpeakerOn />}
+      <video ref={video} className="media" src={entry.url} autoPlay={!paused} loop playsInline muted={muted} onCanPlay={(event) => !paused && void event.currentTarget.play().catch(() => {})} />
+      <button type="button" className="round-btn on-media mute-btn" onClick={toggle} aria-pressed={!muted} aria-label={muted ? 'Turn sound on' : 'Mute the video'}>
+        {muted ? <SpeakerOffIcon /> : <SpeakerOnIcon />}
       </button>
     </>
   );
@@ -177,7 +156,7 @@ function GuessPanel({ view, room }: { view: RoomView; room: RoomController }) {
 
   return (
     <>
-      <h1 className="reveal-title">{locked ? 'Locked in' : 'Whose is it?'}</h1>
+      <h1 className="reveal-title">{locked ? 'Locked in' : view.paused ? 'Paused' : 'Whose is it?'}</h1>
       <div className="guess-grid" role="group" aria-label="Who does this belong to?">
         {view.players.map((player, index) => {
           const picked = guess === player.id;
@@ -186,11 +165,11 @@ function GuessPanel({ view, room }: { view: RoomView; room: RoomController }) {
               key={player.id}
               type="button"
               className={`guess${picked ? ' picked' : ''}`}
-              disabled={locked}
+              disabled={locked || view.paused}
               aria-pressed={picked}
               onClick={() => room.send({ type: 'guess', targetID: player.id })}
             >
-              <Avatar name={player.nickname} colorIndex={index} size="lg" dimmed={locked && !picked} />
+              <Avatar name={player.nickname} colorIndex={index} size="lg" dimmed={(locked && !picked) || (view.paused && !locked)} />
               <span className="guess-name">{player.id === view.you.id ? 'You' : player.nickname}</span>
             </button>
           );
@@ -202,23 +181,5 @@ function GuessPanel({ view, room }: { view: RoomView; room: RoomController }) {
         </p>
       )}
     </>
-  );
-}
-
-function SpeakerOn() {
-  return (
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 9h3l4-4v14l-4-4H4z" />
-      <path d="M16 8.5a5 5 0 010 7M18.5 6a8.5 8.5 0 010 12" />
-    </svg>
-  );
-}
-
-function SpeakerOff() {
-  return (
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 9h3l4-4v14l-4-4H4z" />
-      <path d="M16 9l5 6M21 9l-5 6" />
-    </svg>
   );
 }

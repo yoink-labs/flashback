@@ -30,7 +30,7 @@ export function Podium({
         <h1 className="title podium-title">{me?.rank === 1 ? 'You win!' : `${winnerName} wins!`}</h1>
 
         <div className="podium-stage">
-          {podiumOrder.map((row, index) => {
+          {podiumOrder.map((row) => {
             // Only places that exist, so two players sit centred (2 – 1).
             if (!row) return null;
             const player = view.players.find((candidate) => candidate.id === row.playerID);

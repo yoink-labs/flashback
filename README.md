@@ -9,15 +9,15 @@ A free, open-source [Photo Roulette](https://photoroulette.app) party game with 
 - **Realtime:** a Cloudflare Worker with one Durable Object per room, over WebSockets
 - **Media:** photos and 6-second video clips. Nothing is uploaded in the lobby: each round, one player's device sends one item just before that round, the room relays it over the WebSocket, and nothing is ever stored
 
-The architecture, gameplay, auth model, media pipeline, and conventions are in [docs/SPEC.md](docs/SPEC.md). Milestone 2 (turn-time uploads, everyone guesses, zero storage, new UI) is in [docs/MILESTONE2.md](docs/MILESTONE2.md) and overrides the spec where they differ.
+The architecture, gameplay, auth model, media pipeline, and conventions are in [docs/SPEC.md](docs/SPEC.md). Milestone 2 (turn-time uploads, everyone guesses, zero storage, new UI) is in [docs/MILESTONE2.md](docs/MILESTONE2.md) and overrides the spec where they differ. Milestone 3 (equal bunches with swaps, host settings and pause, save, web parity, iPhone Duo layouts) is in [docs/MILESTONE3.md](docs/MILESTONE3.md) and overrides both.
 
 ## Play
 
 1. Create a room, or join with a code, QR code, or share link (`https://flashback.yoinklabs.dev/join/ABC234`). Before you pick a nickname you see the room: host, players, mode, and rounds.
-2. The host picks rounds (1–30), timer, and **Photos**, **Videos**, or **Mix**.
-3. Everyone builds a **deck** on their own device: on iOS, a random shuffle from your library (or items you choose); on the web, files you pick. You see every photo and video in it and can hide any of them. The deck never leaves your device. Ready up; the host starts when everyone is ready (2 or more, up to 12).
-4. Each round the server picks whose turn it is, and that player's device quietly uploads one random item from their deck while the previous round is still on screen. Nobody is told whose it is, including the owner. Guess whose it is; you can pick anyone, yourself included.
-5. See the reveal and scores, then a final podium. Play again in the same room with the same decks.
+2. The host picks rounds (1–30), time to guess, break length, swaps, and **Photos**, **Videos**, or **Mix**, and can pause the game mid-round.
+3. Everyone is dealt the same-size **bunch**: 12 photos and/or 6 videos (Mix is two steps, photos then videos). On iOS it is dealt at random from your library; on the web from the photos and videos you multi-select. Tap a tile to swap it (the host sets how many swaps; default 3), hold it to see it full size, or deal a new bunch. The bunch never leaves your device. Ready up; the host starts when everyone's bunch is full and everyone is ready (2 or more, up to 12).
+4. Each round the server picks whose turn it is, and that player's device quietly uploads one random item of the kind the server chose for that round (Mix splits rounds 2:1 photos to videos) from their bunch while the previous round is still on screen. Nobody is told whose it is, including the owner. Guess whose it is; you can pick anyone, yourself included.
+5. See the reveal and your result (rank, points this round, movement, total), save any photo you like, then a final podium. Play again in the same room with the same bunches.
 
 ### Scoring
 

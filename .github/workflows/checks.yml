@@ -25,6 +25,7 @@ jobs:
       - run: npm run typecheck --prefix ../web
       - run: npm run check:auth --prefix ../web
       - run: npm run build --prefix ../web
+      - run: npm test --prefix ../web
       - run: npm run typecheck
       - run: npm test
   ios:

@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { loadClerk, useClerk } from '../clerk';
+import { BackIcon } from '../ui/Icons';
 
 export function SignInScreen() {
   const node = useRef<HTMLDivElement>(null);
@@ -31,7 +32,7 @@ export function SignInScreen() {
   return (
     <main className="screen auth-screen">
       <Link className="icon-btn auth-back" to={back} aria-label="Back">
-        ←
+        <BackIcon />
       </Link>
       {failed && (
         <p className="field-error" role="alert">

@@ -8,7 +8,7 @@
 // which the room shell revokes once the round's results are over.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { roomInfo, saveSession, type RoomSession } from './api';
-import type { ClientMessage, MediaHeader, MediaKind, RoomView, TurnMessage } from './types';
+import { normalizeView, type ClientMessage, type MediaHeader, type MediaKind, type RoomView, type ServerMessage, type TurnMessage } from './types';
 
 export type Connection = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
@@ -17,6 +17,8 @@ export interface MediaEntry {
   kind: MediaKind;
   contentType: string;
   url: string;
+  /** The bytes themselves, for Save (fetching a blob: URL can be blocked by CSP). */
+  blob: Blob;
 }
 
 interface Options {
@@ -25,6 +27,8 @@ interface Options {
 }
 
 const decoder = new TextDecoder();
+/** Background requests whose errors only the round's owner could get. */
+const SILENT_REQUESTS = new Set(['pass', 'deck', 'needMedia']);
 
 /** Parses one binary media frame, or null if it is not one. */
 export function parseMediaFrame(data: ArrayBuffer): { header: MediaHeader; blob: Blob } | null {
@@ -62,7 +66,7 @@ export function useRoom(session: RoomSession, options: Options = {}) {
   const storeMedia = useCallback((game: number, round: number, blob: Blob, kind: MediaKind, contentType: string) => {
     const key = mediaKey(game, round);
     if (mediaRef.current[key]) return;
-    mediaRef.current[key] = { key, kind, contentType, url: URL.createObjectURL(blob) };
+    mediaRef.current[key] = { key, kind, contentType, url: URL.createObjectURL(blob), blob };
     setMedia({ ...mediaRef.current });
   }, []);
 
@@ -109,26 +113,35 @@ export function useRoom(session: RoomSession, options: Options = {}) {
           if (frame) storeMedia(frame.header.game, frame.header.round, frame.blob, frame.header.kind, frame.header.contentType);
           return;
         }
-        let message: { type?: string } & Record<string, unknown>;
+        let message: ServerMessage;
         try {
-          message = JSON.parse(event.data);
+          message = JSON.parse(event.data) as ServerMessage;
         } catch {
           return;
         }
-        if (message.type === 'state') {
-          const state = message.state as RoomView;
-          offset.current = state.serverNow - Date.now();
-          setView(state);
-        } else if (message.type === 'error') {
-          // Errors from background messages (turn passes, deck counts, media
-          // re-requests) must never show: only the round's owner could get them.
-          if (!['pass', 'deck', 'needMedia'].includes(String(message.request ?? ''))) setError(String(message.message ?? 'Something went wrong.'));
+        switch (message.type) {
+          case 'state': {
+            const state = normalizeView(message.state);
+            offset.current = state.serverNow - Date.now();
+            setView(state);
+            break;
+          }
+          case 'error':
+            // Errors from background messages (turn passes, deck counts, media
+            // re-requests) must never show: only the round's owner could get them.
+            if (!SILENT_REQUESTS.has(message.request ?? '')) setError(message.message || 'Something went wrong.');
+            break;
+          case 'session':
+            token.current = message.token;
+            saveSession({ ...session, token: message.token, expiresAt: message.expiresAt });
+            break;
+          case 'turn':
+            onTurn.current?.(message);
+            break;
+          case 'closed':
+            finish(message.reason || 'room-closed');
+            break;
         }
-        else if (message.type === 'session') {
-          token.current = String(message.token);
-          saveSession({ ...session, token: token.current, expiresAt: Number(message.expiresAt) });
-        } else if (message.type === 'turn') onTurn.current?.(message as unknown as TurnMessage);
-        else if (message.type === 'closed') finish(String(message.reason ?? 'room-closed'));
       };
       ws.onclose = async (event) => {
         clearInterval(ping);

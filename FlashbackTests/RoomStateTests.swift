@@ -77,6 +77,10 @@ import XCTest
         XCTAssertEqual(try encode(.deck(DeckCount(photos: 24, videos: 3))).sortedJSON, #"{"photos":24,"type":"deck","videos":3}"#.sortedJSON)
         XCTAssertEqual(try encode(.pass("abc123")).sortedJSON, #"{"slot":"abc123","type":"pass"}"#.sortedJSON)
         XCTAssertEqual(try encode(.needMedia(4)).sortedJSON, #"{"round":4,"type":"needMedia"}"#.sortedJSON)
+        XCTAssertEqual(try encode(.pause).sortedJSON, #"{"type":"pause"}"#.sortedJSON)
+        XCTAssertEqual(try encode(.resume).sortedJSON, #"{"type":"resume"}"#.sortedJSON)
+        XCTAssertEqual(try encode(.settings(breakSeconds: 10)).sortedJSON, #"{"breakSeconds":10,"type":"settings"}"#.sortedJSON)
+        XCTAssertEqual(try encode(.settings(swaps: 0)).sortedJSON, #"{"swaps":0,"type":"settings"}"#.sortedJSON)
         XCTAssertTrue(ClientMessage.ping.isPing)
     }
 
@@ -147,9 +151,137 @@ import XCTest
         XCTAssertEqual(RoomLayout.compact.guessColumns, 4)
         XCTAssertEqual(RoomLayout.wide.guessColumns, 3)
         XCTAssertEqual(RoomLayout.tall.guessColumns, 3)
-        XCTAssertEqual(RoomLayout.compact.deckColumns, 3)
-        XCTAssertEqual(RoomLayout.tall.deckColumns, 5)
-        XCTAssertEqual(RoomLayout.wide.deckColumns, 6)
+        XCTAssertEqual(RoomLayout.forSize(CGSize(width: 382, height: 678)), .compact)  // Duo outer, minus the vertical bar
+        XCTAssertEqual(RoomLayout.forSize(CGSize(width: 867, height: 669)), .wide)     // Duo inner, minus the vertical bar
+        // Duo outer with the keyboard up reads as wide. Home and Join must pick their
+        // layout from the keyboard-free size (KeyboardStableLayout), or focusing a
+        // text field on the cover swaps panes and drops the focus.
+        XCTAssertEqual(RoomLayout.forSize(CGSize(width: 382, height: 380)), .wide)
+        XCTAssertEqual(RoomLayout.forSize(CGSize(width: 382, height: 678)), .compact)
+        XCTAssertEqual(RoomLayout.compact.bunchColumns(.photo), 3)
+        XCTAssertEqual(RoomLayout.tall.bunchColumns(.photo), 4)
+        XCTAssertEqual(RoomLayout.compact.bunchColumns(.video), 3)
+    }
+
+    func testMilestone3SettingsAndPauseDecodeWithDefaults() throws {
+        // Old server: no breakSeconds / swaps / paused.
+        let state = try XCTUnwrap(decode(Self.revealJSON).state)
+        XCTAssertEqual(state.settings.breakSeconds, 7)
+        XCTAssertEqual(state.settings.swaps, 3)
+        XCTAssertFalse(state.paused)
+        XCTAssertNil(state.pausedRemainingMs)
+        XCTAssertEqual(state.settings.summary, "Mix · 10 rounds · 20s")
+        var single = state.settings
+        single.rounds = 1
+        XCTAssertEqual(single.summary, "Mix · 1 round · 20s")
+        XCTAssertEqual(RoomSettings.roundsLabel(3), "3 rounds")
+
+        let paused = Self.revealJSON
+            .replacingOccurrences(of: #""mediaMode":"both"}"#, with: #""mediaMode":"both","breakSeconds":15,"swaps":5}"#)
+            .replacingOccurrences(of: #""podium":[]}"#, with: #""podium":[],"paused":true,"pausedRemainingMs":12000}"#)
+        let view = try XCTUnwrap(decode(paused).state)
+        XCTAssertEqual(view.settings.breakSeconds, 15)
+        XCTAssertEqual(view.settings.swaps, 5)
+        XCTAssertTrue(view.paused)
+        XCTAssertEqual(view.pausedRemainingMs, 12000)
+        // Timers freeze at the paused remaining time.
+        XCTAssertEqual(view.remainingMs(until: 1, now: 999_999_999), 12000)
+        XCTAssertFalse(view.canPause)
+        XCTAssertTrue(state.canPause)
+        XCTAssertEqual(state.remainingMs(until: 1_700_000_020_000, now: 1_700_000_005_000), 15000)
+    }
+
+    func testFinalResultIsTheLastRound() throws {
+        var view = try XCTUnwrap(decode(Self.revealJSON).state)
+        XCTAssertFalse(view.isFinalResult)  // no result yet
+        view.phase = .results
+        view.lastResult = RoundResult(index: 2, ownerID: "g_1", kind: .photo, rows: [])
+        XCTAssertFalse(view.isFinalResult)  // round 2 of 10
+        view.lastResult?.index = 10
+        XCTAssertTrue(view.isFinalResult)
+        view.round = nil  // falls back to settings.rounds
+        view.settings.rounds = 1
+        view.lastResult?.index = 1
+        XCTAssertTrue(view.isFinalResult)
+    }
+
+    func testRoundPhasePredicatesDrivePauseAndGuessing() throws {
+        var view = try XCTUnwrap(decode(Self.revealJSON).state)
+        XCTAssertTrue(view.isInRound)
+        XCTAssertTrue(view.canGuess)
+        XCTAssertTrue(view.hasDeadline)
+        XCTAssertFalse(view.showsPause)
+
+        view.paused = true
+        view.pausedRemainingMs = nil
+        XCTAssertTrue(view.showsPause)
+        XCTAssertFalse(view.canGuess)
+        XCTAssertFalse(view.canPause)
+        XCTAssertFalse(view.hasDeadline)  // paused while still waiting for the upload
+        view.pausedRemainingMs = 900
+        XCTAssertTrue(view.hasDeadline)
+
+        view.phase = .lobby
+        XCTAssertFalse(view.isInRound)
+        XCTAssertFalse(view.showsPause)  // a stale flag never shows the overlay outside a round
+
+        let countdown = try XCTUnwrap(decode(Self.countdownJSON).state)
+        XCTAssertFalse(countdown.hasDeadline)
+        XCTAssertFalse(countdown.canGuess)
+    }
+
+    func testPauseHoldsTheClipAndResumePlaysOn() throws {
+        let store = makeStore()
+        store.handle(try decode(Self.revealJSON))
+        let clip = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "web-clip", withExtension: "mp4")))
+        store.handleMedia(MediaFrame.encode(header: MediaHeader(type: "media", game: 2, round: 2, kind: .video, contentType: "video/mp4"), bytes: clip))
+        let player = try XCTUnwrap(store.playback.player)
+        XCTAssertNotEqual(player.rate, 0)
+
+        var view = try XCTUnwrap(store.view)
+        view.paused = true
+        view.pausedRemainingMs = 9000
+        store.apply(view)
+        XCTAssertEqual(player.rate, 0)
+        XCTAssertTrue(store.playback.player === player)  // same clip, same frame
+
+        view.paused = false
+        view.pausedRemainingMs = nil
+        store.apply(view)
+        XCTAssertNotEqual(player.rate, 0)
+
+        view.phase = .results
+        view.lastResult = RoundResult(index: 2, ownerID: "g_1", kind: .video, rows: [])
+        store.apply(view)
+        XCTAssertEqual(player.rate, 0)  // results hold the last frame
+        XCTAssertTrue(store.canSave)
+    }
+
+    func testToastsWithAnActionStayLonger() {
+        XCTAssertEqual(Toast(text: "Saved", symbol: "checkmark").duration, .seconds(2))
+        XCTAssertEqual(Toast(text: "Allow", symbol: "x", isError: true, action: .openSettings).duration, .seconds(5))
+        XCTAssertEqual(MediaSaver.SaveError.denied.errorDescription, "Allow Flashback to add to Photos in Settings.")
+    }
+
+    func testTurnKindDecodes() throws {
+        let turn = try decode(#"{"type":"turn","slot":"s1","game":1,"round":2,"mode":"both","kind":"video"}"#)
+        XCTAssertEqual(turn.kind, .video)
+        let old = try decode(#"{"type":"turn","slot":"s1","game":1,"round":2,"mode":"both"}"#)
+        XCTAssertNil(old.kind)
+    }
+
+    func testSettingsReachTheDeckAndClampSwaps() throws {
+        let store = makeStore()
+        store.handle(try decode(Self.revealJSON))
+        XCTAssertEqual(store.deck.mode, .both)
+        XCTAssertEqual(store.deck.kinds, [.photo, .video])
+        XCTAssertEqual(store.deck.state.swapLimit, 3)
+        var view = try XCTUnwrap(store.view)
+        view.settings.swaps = 1
+        view.settings.mediaMode = .videos
+        store.apply(view)
+        XCTAssertEqual(store.deck.state.swapLimit, 1)
+        XCTAssertEqual(store.deck.currentStep, .video)
     }
 
     /// Folding or unfolding re-lays out the room but must not touch game state,
@@ -199,10 +331,12 @@ import XCTest
         results.lastResult = RoundResult(index: 2, ownerID: "g_1", kind: .photo, rows: [])
         store.apply(results)
         XCTAssertNotNil(store.revealImage)  // small thumbnail beside "It was Host's!"
+        XCTAssertTrue(store.canSave)         // the round's media can still be saved
 
         results.phase = .podium
         store.apply(results)
         XCTAssertNil(store.revealImage)
+        XCTAssertFalse(store.canSave)
 
         store.handle(ServerMessage(type: "session", token: "new.token.value", expiresAt: 4_100_000_000))
         XCTAssertEqual(vault.load(code: "ABC234")?.token, "new.token.value")

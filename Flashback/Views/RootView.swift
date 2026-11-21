@@ -17,6 +17,9 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .fontDesign(.rounded)
         .tint(Palette.accent)
+        #if DEBUG
+        .task { DebugFixtures.apply(to: room) }
+        #endif
     }
 }
 

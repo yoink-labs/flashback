@@ -74,6 +74,39 @@ export interface RoomSettings {
   rounds: number;
   timerSeconds: number;
   mediaMode: MediaMode;
+  /** Length of the results screen between rounds (3–30). */
+  breakSeconds: number;
+  /** Swaps each player gets per bunch (0–10). */
+  swaps: number;
+}
+
+export const DEFAULT_SETTINGS: RoomSettings = { rounds: 10, timerSeconds: 20, mediaMode: 'both', breakSeconds: 7, swaps: 3 };
+
+const intIn = (value: unknown, min: number, max: number, fallback: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
+
+/** Settings from any server (older ones lack `breakSeconds` / `swaps`). */
+export function normalizeSettings(raw: Partial<RoomSettings> | null | undefined): RoomSettings {
+  const s = raw ?? {};
+  return {
+    rounds: intIn(s.rounds, 1, 30, DEFAULT_SETTINGS.rounds),
+    timerSeconds: intIn(s.timerSeconds, 10, 60, DEFAULT_SETTINGS.timerSeconds),
+    mediaMode: s.mediaMode === 'photos' || s.mediaMode === 'videos' || s.mediaMode === 'both' ? s.mediaMode : DEFAULT_SETTINGS.mediaMode,
+    breakSeconds: intIn(s.breakSeconds, 3, 30, DEFAULT_SETTINGS.breakSeconds),
+    swaps: intIn(s.swaps, 0, 10, DEFAULT_SETTINGS.swaps),
+  };
+}
+
+/** Fills in fields an older server may not send. */
+export function normalizeView(raw: RoomView): RoomView {
+  return {
+    ...raw,
+    settings: normalizeSettings(raw.settings),
+    paused: raw.paused === true,
+    pausedRemainingMs: typeof raw.pausedRemainingMs === 'number' ? raw.pausedRemainingMs : null,
+    players: raw.players ?? [],
+    podium: raw.podium ?? [],
+  };
 }
 
 export interface RoomView {
@@ -85,6 +118,9 @@ export interface RoomView {
   settings: RoomSettings;
   serverNow: number;
   phaseEndsAt: number | null;
+  /** The host paused the game; timers are frozen at `pausedRemainingMs`. */
+  paused: boolean;
+  pausedRemainingMs: number | null;
   startBlocker: string | null;
   players: PlayerView[];
   /** Everything the viewer is told about themselves. No items, ever. */
@@ -103,6 +139,8 @@ export interface TurnMessage {
   game: number;
   round: number;
   mode: MediaMode;
+  /** M3 §7: the kind this round needs. Absent from older servers. */
+  kind?: MediaKind;
 }
 
 /** Header of a binary media frame: [4-byte BE length][JSON header][bytes]. */
@@ -128,19 +166,13 @@ export type ClientMessage =
   | { type: 'pass'; slot: string }
   | { type: 'needMedia'; round: number }
   | { type: 'ready'; ready: boolean }
-  | { type: 'settings'; rounds?: number; timerSeconds?: number; mediaMode?: MediaMode }
+  | ({ type: 'settings' } & Partial<RoomSettings>)
   | { type: 'start' }
+  | { type: 'pause' }
+  | { type: 'resume' }
   | { type: 'guess'; targetID: string }
   | { type: 'advance' }
   | { type: 'end' }
   | { type: 'playAgain' }
   | { type: 'leave' }
   | { type: 'ping' };
-
-export const MODE_LABEL: Record<MediaMode, string> = {
-  photos: 'Photos',
-  videos: 'Videos',
-  both: 'Photos & videos',
-};
-
-export const modeSummary = (mode: MediaMode) => (mode === 'photos' ? 'Photos only' : mode === 'videos' ? 'Videos only' : 'Photos & videos');
