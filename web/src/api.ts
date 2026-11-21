@@ -5,7 +5,12 @@
 //   • Signed in: the same calls with a Clerk session token (Authorization: Bearer).
 // Both return a short-lived room session token (Worker-signed, scoped to one room
 // and one player) that the app keeps in localStorage for reconnects.
+//
+// The only other request in Milestone 2 is the owner's one-item upload for a
+// round (POST /v1/rooms/:code/media?slot=…). There is no media download: items
+// arrive over the WebSocket instead.
 import { clerkToken } from './clerk';
+import type { RoomSettings } from './types';
 
 export interface RoomSession {
   code: string;
@@ -68,26 +73,42 @@ async function enter(path: string, nickname: string, signedIn: boolean) {
 export const createRoom = (nickname: string, signedIn: boolean) => enter('/v1/rooms', nickname, signedIn);
 export const joinRoom = (code: string, nickname: string, signedIn: boolean) => enter(`/v1/rooms/${code}/join`, nickname, signedIn);
 
+/** Preview of a room before joining: host name, settings, player count. */
 export interface RoomInfo {
   code: string;
   phase: string;
   players: number;
   capacity: number;
   joinable: boolean;
+  host?: string;
+  settings?: RoomSettings;
 }
 export const roomInfo = (code: string) => call<RoomInfo>(`/v1/rooms/${code}`);
 
-export const uploadMedia = (session: RoomSession, blob: Blob, type: 'image/jpeg' | 'video/mp4') =>
-  call<{ item: { id: string; kind: string } }>(`/v1/rooms/${session.code}/media`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': type },
-    body: blob,
-  });
-
-export async function fetchMedia(session: RoomSession, path: string, signal?: AbortSignal) {
-  const res = await fetch(path, { headers: { Authorization: `Bearer ${session.token}` }, cache: 'no-store', signal });
-  if (!res.ok) throw new APIError(res.status, 'This photo or video is no longer available.');
-  return res.blob();
+/**
+ * Upload the one prepared item for a slot. The room token authorizes it; the
+ * server tells us the slot in the private `turn` message. Resolves quietly: the
+ * owner's own copy is cached locally, so no response body is needed.
+ */
+export async function uploadMedia(session: RoomSession, slot: string, blob: Blob, contentType: 'image/jpeg' | 'video/mp4') {
+  let res: Response;
+  try {
+    res = await fetch(`/v1/rooms/${session.code}/media?slot=${encodeURIComponent(slot)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': contentType },
+      body: blob,
+      cache: 'no-store',
+      // The server reassigns a slot after 20 s; do not block the turn queue
+      // forever on a stalled upload.
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch {
+    throw new APIError(0, 'Could not reach Flashback.');
+  }
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new APIError(res.status, body.error ?? 'That upload did not go through.');
+  }
 }
 
 export async function leaveRoom(session: RoomSession) {
@@ -95,5 +116,10 @@ export async function leaveRoom(session: RoomSession) {
   forgetSession(session.code);
 }
 
-export const normalizeCode = (input: string) => input.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+/** Codes use an unambiguous alphabet (no 0/O/1/I), so anything else is dropped. */
+export const normalizeCode = (input: string) => input.toUpperCase().replace(/[^ABCDEFGHJKMNPQRSTUVWXYZ23456789]/g, '').slice(0, 6);
 export const isCode = (code: string) => /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/.test(code);
+
+/** The player's own last nickname, remembered on this device. */
+export const savedNickname = () => localStorage.getItem('flashback.nickname') ?? '';
+export const rememberNickname = (nickname: string) => localStorage.setItem('flashback.nickname', nickname);

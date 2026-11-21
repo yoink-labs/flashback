@@ -4,9 +4,9 @@ import Photos
 import UniformTypeIdentifiers
 
 /// On-device preparation. Originals never leave the phone:
-/// photos become a ≤1600 px JPEG with no metadata (no EXIF/GPS);
-/// videos become a 5–8 s (6 s target) H.264 MP4 clip of at most 8 MB with
-/// metadata stripped.
+/// photos become a ≤1440 px JPEG at quality ~0.78 with no metadata (no EXIF/GPS);
+/// videos become a 6 s (up to 8 s) H.264 MP4 clip of at most 8 MB, 720p or less,
+/// with metadata stripped.
 enum MediaProcessor {
     // ---- photos ----
 
@@ -20,7 +20,7 @@ enum MediaProcessor {
             kCGImageSourceShouldCacheImmediately: true,
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { throw MediaError.unreadable }
-        for quality in [0.8, 0.65, 0.5, 0.35] {
+        for quality in [MediaConstraints.photoQuality, 0.65, 0.5, 0.35] {
             let out = NSMutableData()
             guard let destination = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { throw MediaError.unreadable }
             // No metadata dictionary: nothing from the original (EXIF, GPS, TIFF) is copied.

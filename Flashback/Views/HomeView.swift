@@ -1,112 +1,170 @@
 import SwiftUI
 
-/// Create or join a room. Guests need only a nickname; signing in is optional.
+/// Wordmark, one line, your name, and the two doors. Sign-in is a small text
+/// button top-right; guests need only a name.
 struct HomeView: View {
     @EnvironmentObject private var room: RoomStore
     @EnvironmentObject private var account: AccountStore
+    @AppStorage("flashback.lastNickname") private var lastName = ""
     @State private var signingIn = false
-    @State private var asGuest = false
+    @FocusState private var nicknameFocused: Bool
 
-    private var useAccount: Bool { account.signedIn && !asGuest }
+    private var nickname: Result<String, NicknameError> { Nickname.validate(room.draftNickname) }
+    private var nicknameValid: Bool {
+        if case .success = nickname { return true }
+        return false
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Flashback").font(.system(size: 44, weight: .black, design: .rounded))
-                    Text("Whose photo is it? Everyone adds a few photos or short videos, then guesses whose they are.")
-                        .foregroundStyle(.secondary)
+        GeometryReader { proxy in
+            ScrollViewReader { scroller in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        accountRow
+                        Spacer(minLength: 20)
+                        hero
+                        actions
+                            .id("actions")
+                            .padding(.top, Spacing.section)
+                        if let error = room.error {
+                            Text(error)
+                                .font(.flCaption)
+                                .foregroundStyle(Palette.bad)
+                                .multilineTextAlignment(.center)
+                                .padding(.top, 12)
+                                .accessibilityIdentifier("error")
+                        }
+                        Spacer(minLength: 24)
+                        Text("Free · no account · nothing is kept")
+                            .font(.flCaption)
+                            .foregroundStyle(Palette.text3)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(.horizontal, Spacing.pageCompact)
+                    .padding(.vertical, 16)
+                    .frame(maxWidth: 440)
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height)
                 }
-                Card {
-                    Text("Nickname").font(.headline)
-                    TextField("What should friends call you?", text: $room.draftNickname)
-                        .textInputAutocapitalization(.words)
-                        .autocorrectionDisabled()
-                        .padding(12)
-                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                        .accessibilityIdentifier("nickname")
-                    identity
+                .scrollDismissesKeyboard(.interactively)
+                .onChange(of: nicknameFocused) { _, focused in
+                    guard focused else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            scroller.scrollTo("actions", anchor: .bottom)
+                        }
+                    }
                 }
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 16) { createCard; joinCard }
-                    VStack(spacing: 16) { createCard; joinCard }
-                }
-                if let error = room.error { Text(error).foregroundStyle(Palette.bad).accessibilityIdentifier("error") }
-                Text("Free and open source by Yoink Labs. Photos and videos are deleted after each round.")
-                    .font(.footnote).foregroundStyle(.secondary)
             }
-            .padding(20)
-            .frame(maxWidth: 820)
-            .frame(maxWidth: .infinity)
         }
-        .scrollDismissesKeyboard(.interactively)
-        .sheet(isPresented: $signingIn) { SignInView() }
+        .background(Palette.bg.ignoresSafeArea())
+        .sheet(isPresented: $signingIn) {
+            SignInView().environmentObject(account)
+        }
+        .fullScreenCover(isPresented: $room.showJoin) {
+            JoinView()
+                .environmentObject(room)
+                .environmentObject(account)
+        }
+        .onAppear {
+            if room.draftNickname.isEmpty { room.draftNickname = lastName }
+        }
+        .onChange(of: room.draftNickname) { _, value in
+            lastName = value
+        }
         .onChange(of: account.displayName, initial: true) { _, name in
             if room.draftNickname.isEmpty && !name.isEmpty { room.draftNickname = name }
         }
     }
 
-    @ViewBuilder private var identity: some View {
-        if useAccount {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.seal.fill").foregroundStyle(Palette.good)
-                Text("Signed in with Yoink Labs").font(.subheadline)
-                Spacer()
-                Menu("Options") {
-                    Button("Play as a guest instead") { asGuest = true }
-                    Button("Sign out", role: .destructive) { Task { await account.signOut() } }
-                }.font(.subheadline)
+    // MARK: - Pieces
+
+    private var hero: some View {
+        VStack(spacing: 20) {
+            PolaroidStack()
+            VStack(spacing: 6) {
+                Text("Flashback")
+                    .font(.fl(40, .heavy))
+                    .foregroundStyle(Palette.text)
+                Text("Whose camera roll is it?")
+                    .font(.flBody)
+                    .foregroundStyle(Palette.text2)
+                    .multilineTextAlignment(.center)
             }
-        } else {
-            HStack(spacing: 6) {
-                Text("Playing as a **guest**. No account needed.").font(.subheadline).foregroundStyle(.secondary)
-                Spacer()
-                if account.signedIn { Button("Use my account") { asGuest = false }.font(.subheadline) }
-                else { Button("Sign in") { signingIn = true }.font(.subheadline).accessibilityIdentifier("sign-in") }
-            }
+            .accessibilityElement(children: .combine)
         }
     }
 
-    private var nickname: Result<String, NicknameError> { Nickname.validate(room.draftNickname) }
-
-    private var createCard: some View {
-        Card {
-            Text("Host a game").font(.title3.bold())
-            Text("Create a room and share the code.").foregroundStyle(.secondary).font(.subheadline)
-            Button(room.busy ? "One moment…" : "Create a room") {
-                guard case .success(let name) = nickname else { return room.error = nicknameError }
-                Task { await room.create(nickname: name, clerkToken: useAccount ? await account.token() : nil) }
-            }
-            .buttonStyle(.primary)
-            .disabled(room.busy)
-            .accessibilityIdentifier("create-room")
-        }
-    }
-
-    private var joinCard: some View {
-        Card {
-            Text("Join a game").font(.title3.bold())
-            TextField("Room code", text: Binding(get: { room.draftCode }, set: { room.draftCode = RoomCode.sanitize($0) }))
-                .font(.title2.weight(.heavy).monospaced())
-                .multilineTextAlignment(.center)
-                .textInputAutocapitalization(.characters)
+    private var actions: some View {
+        VStack(spacing: 12) {
+            TextField("", text: nicknameBinding, prompt: Text("Your name").foregroundStyle(Palette.text3))
+                .font(.fl(17, .medium))
+                .foregroundStyle(Palette.text)
+                .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
-                .padding(10)
-                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                .accessibilityIdentifier("room-code")
-            Button("Join room") {
-                guard case .success(let name) = nickname else { return room.error = nicknameError }
-                guard let code = RoomCode.normalize(room.draftCode) else { return room.error = "Room codes are 6 letters and numbers." }
-                Task { await room.join(code: code, nickname: name, clerkToken: useAccount ? await account.token() : nil) }
+                .submitLabel(.done)
+                .focused($nicknameFocused)
+                .padding(.horizontal, 16)
+                .frame(height: Spacing.row)
+                .background(Palette.surface2, in: RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
+                .accessibilityIdentifier("nickname")
+
+            Button {
+                nicknameFocused = false
+                Task { await host() }
+            } label: {
+                Text(room.busy ? "One moment…" : "Host a game")
             }
             .buttonStyle(.primary)
-            .disabled(room.busy || RoomCode.normalize(room.draftCode) == nil)
+            .disabled(!nicknameValid || room.busy)
+            .accessibilityIdentifier("create-room")
+
+            Button {
+                nicknameFocused = false
+                room.showJoin = true
+            } label: {
+                Text("Join with code")
+            }
+            .buttonStyle(.secondary)
+            .disabled(!nicknameValid)
             .accessibilityIdentifier("join-room")
         }
     }
 
-    private var nicknameError: String? {
-        if case .failure(let e) = nickname { return e.localizedDescription }
-        return nil
+    @ViewBuilder private var accountRow: some View {
+        HStack {
+            Spacer()
+            if account.signedIn {
+                Menu {
+                    Button("Sign out", role: .destructive) { Task { await account.signOut() } }
+                } label: {
+                    Text(account.displayName.isEmpty ? "Account" : account.displayName)
+                        .font(.fl(15, .semibold))
+                        .foregroundStyle(Palette.text2)
+                        .lineLimit(1)
+                }
+                .accessibilityLabel("Signed in as \(account.displayName)")
+            } else {
+                Button("Sign in") { signingIn = true }
+                    .buttonStyle(.text)
+                    .accessibilityIdentifier("sign-in")
+            }
+        }
+        .frame(height: 44)
+    }
+
+    private var nicknameBinding: Binding<String> {
+        Binding(
+            get: { room.draftNickname },
+            set: { room.draftNickname = String($0.prefix(Nickname.maxLength)) }
+        )
+    }
+
+    private func host() async {
+        guard case .success(let name) = nickname else {
+            if case .failure(let error) = nickname { room.error = error.localizedDescription }
+            return
+        }
+        await room.create(nickname: name, clerkToken: account.signedIn ? await account.token() : nil)
     }
 }

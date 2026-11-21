@@ -1,19 +1,25 @@
-import { useState } from 'react';
+// The front door: a fanned stack of polaroids, the wordmark, one name field,
+// and the two ways in. Nothing else.
+import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createRoom, isCode, normalizeCode } from '../api';
-import { EntryForm } from './Entry';
+import { createRoom } from '../api';
+import { AccountControl, NameInput, useNickname } from './Entry';
 
 export function Home() {
   const navigate = useNavigate();
+  const { name, setName, problem, valid, signedIn, playAsGuest, useAccount, remember } = useNickname();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [code, setCode] = useState('');
+  const problemText = name.trim() ? problem : null;
 
-  const create = async (nickname: string, signedIn: boolean) => {
+  const host = async (event: FormEvent) => {
+    event.preventDefault();
+    remember();
+    if (!valid) return;
     setBusy(true);
     setError(null);
     try {
-      const session = await createRoom(nickname, signedIn);
+      const session = await createRoom(name.trim(), signedIn);
       navigate(`/room/${session.code}`);
     } catch (e) {
       setError((e as Error).message);
@@ -23,44 +29,38 @@ export function Home() {
   };
 
   return (
-    <main className="home">
-      <section className="hero">
-        <h1>Whose photo is it?</h1>
-        <p>
-          Flashback is a free party game. Everyone adds a few photos or short videos, then guesses whose they are. Play on the web or iPhone in the same room.
-        </p>
-      </section>
-      <div className="split">
-        <EntryForm action="Create a room" busy={busy} error={error} onSubmit={create}>
-          <h2>Host a game</h2>
-        </EntryForm>
-        <form
-          className="card entry"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (isCode(code)) navigate(`/join/${code}`);
-          }}
-        >
-          <h2>Join a game</h2>
-          <label>
-            Room code
-            <input
-              className="code-input"
-              value={code}
-              onChange={(e) => setCode(normalizeCode(e.target.value))}
-              placeholder="ABC234"
-              autoCapitalize="characters"
-              autoComplete="off"
-              inputMode="text"
-              data-testid="room-code"
-            />
-          </label>
-          <button className="primary" disabled={!isCode(code)}>
-            Next
+    <main className="screen home-screen">
+      <header className="home-top">
+        <AccountControl signedIn={signedIn} onGuest={playAsGuest} onAccount={useAccount} />
+      </header>
+
+      <div className="home-center">
+        <div className="polaroids" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <h1 className="wordmark">Flashback</h1>
+        <p className="home-sub">Whose camera roll is it?</p>
+
+        <form className="home-form" onSubmit={host}>
+          <NameInput value={name} onChange={setName} invalid={Boolean(problemText)} disabled={busy} />
+          {problemText && <p className="field-error">{problemText}</p>}
+          {error && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          )}
+          <button type="submit" className="btn primary action-btn" disabled={!valid || busy} aria-busy={busy}>
+            Host a game
           </button>
-          <p className="hint">Codes are 6 letters and numbers. You can also open a friend’s join link.</p>
+          <button type="button" className="btn secondary action-btn" onClick={() => navigate('/join')}>
+            Join with code
+          </button>
         </form>
       </div>
+
+      <p className="home-footer">Free · no account · nothing is kept</p>
     </main>
   );
 }

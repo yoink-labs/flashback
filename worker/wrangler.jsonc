@@ -1,6 +1,6 @@
 {
   // Flashback API + web app, live at https://flashback.yoinklabs.dev.
-  // R2 bucket `flashback-media` has a 1-day lifecycle rule on rooms/ as a backstop.
+  // No R2: each round's one item lives in the room Durable Object's memory only.
   "name": "flashback",
   "account_id": "2bc9c3c136a62ea9dcbddaa6f59edca4",
   "main": "src/index.ts",
@@ -14,7 +14,6 @@
   },
   "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "Room" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
-  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "flashback-media" }],
   "observability": { "enabled": true, "head_sampling_rate": 0.1 },
   "vars": { "CLERK_ISSUER": "https://clerk.yoinklabs.dev", "WEB_URL": "https://flashback.yoinklabs.dev" }
 }

@@ -79,6 +79,19 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(api.webSocketURL(code: "ABC234").absoluteString, "wss://example.test/v1/rooms/ABC234/ws")
         XCTAssertEqual(APIClient(base: URL(string: "http://127.0.0.1:8787")!).webSocketURL(code: "ABC234").absoluteString, "ws://127.0.0.1:8787/v1/rooms/ABC234/ws")
     }
+
+    func testTurnUploadUsesSlotQueryAndRoomToken() async throws {
+        let recorder = RequestRecorder()
+        let api = APIClient(base: URL(string: "https://example.test")!, urlSession: recorder.session)
+        let session = RoomSession(code: "ABC234", playerID: "g_1", nickname: "Sam", token: "room.token", expiresAt: 4_000_000_000, joinURL: "")
+        _ = try? await api.upload(Data([1, 2, 3]), kind: .video, slot: "slot123", session: session)
+        let request = try XCTUnwrap(recorder.requests.last)
+        XCTAssertEqual(request.url?.path, "/v1/rooms/ABC234/media")
+        XCTAssertEqual(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "slot", value: "slot123")])
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer room.token")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "video/mp4")
+        XCTAssertEqual(request.httpMethod, "POST")
+    }
 }
 
 /// Captures requests without touching the network.

@@ -1,15 +1,17 @@
 // One Durable Object per room. It owns the room state, the room's session
-// signing key, the WebSocket connections (hibernatable), and the room's media in
-// R2. The Worker authenticates Clerk tokens and forwards requests here with an
-// internal identity header; this object is not reachable from the internet.
+// signing key, the WebSocket connections (hibernatable), and the one media item
+// currently in play for each open slot. Media lives only in this object's memory:
+// it is never written to storage, R2, or anywhere else. The Worker authenticates
+// Clerk tokens and forwards requests here with an internal identity header; this
+// object is not reachable from the internet.
 import { DurableObject } from 'cloudflare:workers';
 import { CAPACITY, Game, GameError, newRoom, defaultRandomness, type Randomness, type RoomState } from './game';
-import { kindForContentType, maxBytes, MediaError, validateMedia } from './media';
+import { kindAllowed, kindForContentType, maxBytes, MediaError, validateMedia, type MediaKind } from './media';
 import { issueSession, newSessionKey, verifySession, SESSION_REFRESH_WINDOW_SECONDS } from './session';
 import { randomID } from './codes';
 
 export const IDENTITY_HEADER = 'x-flashback-identity';
-export const WS_PROTOCOL = 'flashback.v1';
+export const WS_PROTOCOL = 'flashback.v2';
 
 export type ForwardedIdentity = { kind: 'room'; token: string } | { kind: 'clerk'; sub: string } | { kind: 'anonymous' };
 
@@ -17,14 +19,40 @@ interface Attachment {
   playerID: string;
 }
 
-export const mediaPath = (code: string, capability: string) => `/v1/rooms/${code}/media/${capability}`;
-export const roomPrefix = (state: Pick<RoomState, 'code' | 'instance'>) => `rooms/${state.code}/${state.instance}/`;
+/** The bytes for one open slot, kept in memory for this object's lifetime. */
+interface StoredMedia {
+  bytes: Uint8Array;
+  kind: MediaKind;
+  contentType: string;
+  game: number;
+  round: number;
+}
+
+interface FrameHeader {
+  type: 'media';
+  game: number;
+  round: number;
+  kind: MediaKind;
+  contentType: string;
+}
 
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+
+/** `[uint32 BE header length][UTF-8 JSON header][media bytes]`, server → client only. */
+export function mediaFrame(header: FrameHeader, bytes: Uint8Array): ArrayBuffer {
+  const head = new TextEncoder().encode(JSON.stringify(header));
+  const out = new Uint8Array(4 + head.length + bytes.length);
+  new DataView(out.buffer).setUint32(0, head.length, false);
+  out.set(head, 4);
+  out.set(bytes, 4 + head.length);
+  return out.buffer;
+}
 
 export class Room extends DurableObject<Env> {
   private state: RoomState | null = null;
   private key: Uint8Array | null = null;
+  /** The only copy of any round's media. Keyed by slot id. */
+  private media = new Map<string, StoredMedia>();
   /** Overridable in tests for deterministic picks. */
   random: Randomness = defaultRandomness;
   /** Overridable in tests to move time forward. */
@@ -48,9 +76,9 @@ export class Room extends DurableObject<Env> {
     return game;
   }
 
-  /** Persists state, performs deletions, schedules the alarm, and broadcasts. */
+  /** Persists state, frees media, schedules the alarm, and tells clients what changed. */
   private async commit(game: Game) {
-    if (game.deletions.length) await this.env.MEDIA.delete([...new Set(game.deletions)]);
+    for (const slotID of game.freedSlots) this.media.delete(slotID);
     if (game.state.phase === 'closed') return this.destroy();
     this.state = game.state;
     await this.ctx.storage.put('room', game.state);
@@ -58,6 +86,7 @@ export class Room extends DurableObject<Env> {
     if (next === null) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(next);
     this.broadcast(game, game.removed);
+    for (const request of game.turnRequests) this.sendTurn(request.playerID, request.slot, request.game, request.round, request.mode);
   }
 
   private broadcast(game: Game, removed: string[] = []) {
@@ -69,7 +98,7 @@ export class Room extends DurableObject<Env> {
         if (removed.includes(attachment.playerID) || !game.player(attachment.playerID)) {
           ws.send(JSON.stringify({ type: 'closed', reason: 'removed' }));
           ws.close(4001, 'Removed from room');
-        } else ws.send(JSON.stringify({ type: 'state', state: game.view(attachment.playerID, now, (cap) => mediaPath(game.state.code, cap)) }));
+        } else ws.send(JSON.stringify({ type: 'state', state: game.view(attachment.playerID, now) }));
       } catch {
         // Socket already closing.
       }
@@ -78,8 +107,7 @@ export class Room extends DurableObject<Env> {
 
   /** Tears the room down: all media, all storage, all sockets. */
   private async destroy() {
-    const state = this.state;
-    if (state) await this.deletePrefix(roomPrefix(state));
+    this.media.clear();
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.send(JSON.stringify({ type: 'closed', reason: 'room-closed' }));
@@ -91,15 +119,6 @@ export class Room extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     console.log(JSON.stringify({ event: 'room_closed' }));
-  }
-
-  private async deletePrefix(prefix: string) {
-    let cursor: string | undefined;
-    do {
-      const page = await this.env.MEDIA.list({ prefix, cursor, limit: 1000 });
-      if (page.objects.length) await this.env.MEDIA.delete(page.objects.map((o) => o.key));
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
   }
 
   private async resolve(game: Game, identity: ForwardedIdentity) {
@@ -120,20 +139,70 @@ export class Room extends DurableObject<Env> {
     return issueSession(this.key!, { code: state.code, instance: state.instance, playerID: player.id, nickname: player.nickname, kind: player.kind }, Math.floor(this.now() / 1000));
   }
 
+  // ---- media frames ----
+
+  private frameFor(media: StoredMedia) {
+    return mediaFrame({ type: 'media', game: media.game, round: media.round, kind: media.kind, contentType: media.contentType }, media.bytes);
+  }
+
+  private sendTurn(playerID: string, slot: string, game: number, round: number, mode: RoomState['settings']['mediaMode']) {
+    const text = JSON.stringify({ type: 'turn', slot, game, round, mode });
+    for (const ws of this.ctx.getWebSockets(playerID)) {
+      try {
+        ws.send(text);
+      } catch {}
+    }
+  }
+
+  /** Sends a ready slot's bytes to every connected socket except its owner. */
+  private sendMediaToOthers(slotID: string) {
+    const media = this.media.get(slotID);
+    const slot = this.state?.slots.find((sl) => sl.id === slotID);
+    if (!media || !slot) return;
+    const frame = this.frameFor(media);
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as Attachment | null;
+      if (!attachment || attachment.playerID === slot.ownerID) continue;
+      try {
+        ws.send(frame);
+      } catch {}
+    }
+  }
+
+  /** After a socket's first state message: re-send its turn and any media still held. */
+  private sendMissed(ws: WebSocket, playerID: string, state: RoomState) {
+    for (const slot of state.slots) {
+      if (slot.status === 'requested' && slot.ownerID === playerID) this.sendTurnTo(ws, slot.id, state.game, slot.round, state.settings.mediaMode);
+    }
+    // Owners get their own item too: a client that restarted has lost its copy,
+    // and showing "didn't load" only to the owner would give the owner away.
+    for (const [slotID, media] of this.media) {
+      if (media.game !== state.game) continue;
+      if (!state.slots.some((sl) => sl.id === slotID)) continue;
+      try {
+        ws.send(this.frameFor(media));
+      } catch {}
+    }
+  }
+
+  private sendTurnTo(ws: WebSocket, slot: string, game: number, round: number, mode: RoomState['settings']['mediaMode']) {
+    try {
+      ws.send(JSON.stringify({ type: 'turn', slot, game, round, mode }));
+    } catch {}
+  }
+
   // ---- requests from the Worker ----
 
   async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
       const identity = JSON.parse(request.headers.get(IDENTITY_HEADER) ?? '{"kind":"anonymous"}') as ForwardedIdentity;
-      const [, action, arg] = url.pathname.split('/');
+      const [, action] = url.pathname.split('/');
       if (action === 'create' && request.method === 'POST') return await this.create(identity, await request.json());
       if (action === 'info' && request.method === 'GET') return this.info();
       if (action === 'join' && request.method === 'POST') return await this.join(identity, await request.json());
       if (action === 'ws') return await this.openSocket(request, identity);
-      if (action === 'media' && request.method === 'POST') return await this.upload(request, identity);
-      if (action === 'media' && request.method === 'DELETE' && arg) return await this.message(identity, { type: 'removeItem', itemID: arg });
-      if (action === 'media' && request.method === 'GET' && arg) return await this.media(identity, arg);
+      if (action === 'media' && request.method === 'POST') return await this.upload(request, identity, url.searchParams.get('slot'));
       if (action === 'leave' && request.method === 'POST') return await this.message(identity, { type: 'leave' });
       return json({ error: 'Not found.' }, 404);
     } catch (error) {
@@ -160,7 +229,16 @@ export class Room extends DurableObject<Env> {
   private info() {
     if (!this.state || this.state.phase === 'closed') return json({ error: 'That room does not exist or has closed.' }, 404);
     const s = this.game().state;
-    return json({ code: s.code, phase: s.phase, players: s.players.length, capacity: CAPACITY, joinable: (s.phase === 'lobby' || s.phase === 'podium') && s.players.length < CAPACITY });
+    const host = s.players.find((p) => p.id === s.hostID);
+    return json({
+      code: s.code,
+      phase: s.phase,
+      players: s.players.length,
+      capacity: CAPACITY,
+      joinable: (s.phase === 'lobby' || s.phase === 'podium') && s.players.length < CAPACITY,
+      host: host?.nickname ?? null,
+      settings: s.settings,
+    });
   }
 
   private async join(identity: ForwardedIdentity, body: { nickname?: unknown }) {
@@ -183,53 +261,35 @@ export class Room extends DurableObject<Env> {
     if (session && session.expiresAt - Math.floor(this.now() / 1000) < SESSION_REFRESH_WINDOW_SECONDS)
       server.send(JSON.stringify({ type: 'session', ...(await this.session(game.state, player)) }));
     await this.commit(game);
+    // After the state message a client that reconnected gets its turn back and
+    // every item still held in memory (including its own).
+    if (this.state) this.sendMissed(server, player.id, this.state);
     const offered = request.headers.get('Sec-WebSocket-Protocol')?.split(',').map((p) => p.trim()) ?? [];
     return new Response(null, { status: 101, webSocket: client, headers: offered.includes(WS_PROTOCOL) ? { 'Sec-WebSocket-Protocol': WS_PROTOCOL } : {} });
   }
 
-  private async upload(request: Request, identity: ForwardedIdentity) {
+  private async upload(request: Request, identity: ForwardedIdentity, slotID: string | null) {
+    if (!slotID) return json({ error: 'Which turn?' }, 400);
     const game = this.game();
     const { player } = await this.resolve(game, identity);
+    const slot = game.state.slots.find((sl) => sl.id === slotID);
+    if (!slot || slot.status !== 'requested' || slot.ownerID !== player.id) throw new GameError(409, 'That turn has already ended.');
     const kind = kindForContentType(request.headers.get('Content-Type'));
-    game.assertCanAdd(player.id, kind);
+    if (!kindAllowed(game.state.settings.mediaMode, kind))
+      throw new MediaError(422, game.state.settings.mediaMode === 'photos' ? 'The host chose Photos only.' : 'The host chose Videos only.');
     const raw = await readLimited(request, maxBytes(kind));
-    const { bytes, durationMs } = validateMedia(kind, raw);
-    const itemID = randomID(16);
-    const key = `${roomPrefix(game.state)}g${game.state.game}/${itemID}`;
+    const { bytes } = validateMedia(kind, raw);
     const contentType = kind === 'photo' ? 'image/jpeg' : 'video/mp4';
-    await this.env.MEDIA.put(key, bytes, { httpMetadata: { contentType } });
-    // State may have moved on while the upload was in flight.
+    // State may have moved on while the upload was in flight (a timeout re-pick).
     const after = this.game();
-    try {
-      after.addItem(player.id, { id: itemID, kind, key, contentType, bytes: bytes.length, ...(durationMs ? { durationMs } : {}) }, this.now());
-    } catch (error) {
-      await this.env.MEDIA.delete(key);
-      throw error;
-    }
+    const ready = after.markReady(player.id, slotID, kind, this.now());
+    this.media.set(slotID, { bytes, kind, contentType, game: after.state.game, round: ready.round });
     await this.commit(after);
-    return json({ item: { id: itemID, kind, durationMs: durationMs ?? null } }, 201);
+    this.sendMediaToOthers(slotID);
+    return json({ ok: true, kind, round: ready.round }, 201);
   }
 
-  private async media(identity: ForwardedIdentity, capability: string) {
-    const game = this.game();
-    await this.resolve(game, identity);
-    const round = game.state.round;
-    if (game.state.phase !== 'reveal' || !round || !timingSafeEqual(round.capability, capability)) return json({ error: 'This photo or video is no longer available.' }, 404);
-    const item = game.state.items.find((i) => i.id === round.itemID);
-    const object = item && (await this.env.MEDIA.get(item.key));
-    if (!item || !object) return json({ error: 'This photo or video is no longer available.' }, 404);
-    return new Response(object.body, {
-      headers: {
-        'Content-Type': item.contentType,
-        'Content-Length': String(object.size),
-        'Cache-Control': 'private, no-store',
-        'Referrer-Policy': 'no-referrer',
-        'X-Content-Type-Options': 'nosniff',
-      },
-    });
-  }
-
-  /** Applies a client message on behalf of an identity (used by HTTP leave/delete too). */
+  /** Applies a client message on behalf of an identity (used by HTTP leave too). */
   private async message(identity: ForwardedIdentity, message: ClientMessage) {
     const game = this.game();
     const { player } = await this.resolve(game, identity);
@@ -258,6 +318,10 @@ export class Room extends DurableObject<Env> {
     try {
       const game = this.game();
       if (!attachment || !game.player(attachment.playerID)) throw new GameError(403, 'You are no longer in this room.');
+      if (message.type === 'needMedia') {
+        this.sendMediaForRound(ws, message.round);
+        return;
+      }
       apply(game, attachment.playerID, message, this.now());
       await this.commit(game);
     } catch (error) {
@@ -266,6 +330,19 @@ export class Room extends DurableObject<Env> {
       try {
         ws.send(JSON.stringify({ type: 'error', message: text, request: message.type }));
       } catch {}
+    }
+  }
+
+  /** Re-sends a round's media if the bytes are still here, otherwise ignores it. */
+  private sendMediaForRound(ws: WebSocket, round: unknown) {
+    if (typeof round !== 'number' || !this.state) return;
+    for (const [slotID, media] of this.media) {
+      if (media.round !== round || media.game !== this.state.game) continue;
+      if (!this.state.slots.some((sl) => sl.id === slotID)) return;
+      try {
+        ws.send(this.frameFor(media));
+      } catch {}
+      return;
     }
   }
 
@@ -296,12 +373,14 @@ export class Room extends DurableObject<Env> {
 export type ClientMessage =
   | { type: 'ready'; ready: boolean }
   | { type: 'settings'; rounds?: unknown; timerSeconds?: unknown; mediaMode?: unknown }
+  | { type: 'deck'; photos?: unknown; videos?: unknown }
   | { type: 'start' }
   | { type: 'guess'; targetID: unknown }
+  | { type: 'pass'; slot: string }
+  | { type: 'needMedia'; round?: unknown }
   | { type: 'advance' }
   | { type: 'end' }
   | { type: 'playAgain' }
-  | { type: 'removeItem'; itemID: string }
   | { type: 'leave' }
   | { type: 'ping' };
 
@@ -311,18 +390,20 @@ export function apply(game: Game, playerID: string, message: ClientMessage, now:
       return game.setReady(playerID, message.ready === true, now);
     case 'settings':
       return game.updateSettings(playerID, { rounds: message.rounds, timerSeconds: message.timerSeconds, mediaMode: message.mediaMode }, now);
+    case 'deck':
+      return game.setDeck(playerID, message.photos, message.videos, now);
     case 'start':
       return game.start(playerID, now);
     case 'guess':
       return game.guess(playerID, message.targetID, now);
+    case 'pass':
+      return game.pass(playerID, String(message.slot), now);
     case 'advance':
       return game.advance(playerID, now);
     case 'end':
       return game.end(playerID, now);
     case 'playAgain':
       return game.playAgain(playerID, now);
-    case 'removeItem':
-      return game.removeItem(playerID, String(message.itemID), now);
     case 'leave':
       return game.leave(playerID, now);
     default:
@@ -354,11 +435,4 @@ async function readLimited(request: Request, limit: number) {
     offset += chunk.length;
   }
   return bytes;
-}
-
-function timingSafeEqual(a: string, b: string) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
 }

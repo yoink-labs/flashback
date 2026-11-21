@@ -51,4 +51,48 @@ enum Scoring {
             return a.joinSeq < b.joinSeq
         }
     }
+
+    /// Standings after a round, with each player's rank before it, for the
+    /// movement arrows on the results screen.
+    enum Standings {
+        struct Row: Identifiable, Equatable {
+            var id: String
+            var score: Int
+            var previous: Int
+            var rank: Int
+            var previousRank: Int
+            /// Positive means the player climbed.
+            var movement: Int { previousRank - rank }
+        }
+
+        static func rows(players: [PlayerView], result: RoundResult?) -> [Row] {
+            let deltas = Dictionary(uniqueKeysWithValues: (result?.rows ?? []).map { ($0.playerID, $0.points) })
+            let currentScores = Dictionary(uniqueKeysWithValues: players.map { ($0.id, $0.score) })
+            let previousScores = Dictionary(uniqueKeysWithValues: players.map { ($0.id, $0.score - (deltas[$0.id] ?? 0)) })
+            let joinOrder = Dictionary(uniqueKeysWithValues: players.enumerated().map { ($0.element.id, $0.offset) })
+
+            func order(_ scores: [String: Int]) -> [String] {
+                players.map(\.id).sorted { a, b in
+                    let sa = scores[a] ?? 0, sb = scores[b] ?? 0
+                    if sa != sb { return sa > sb }
+                    return (joinOrder[a] ?? 0) < (joinOrder[b] ?? 0)
+                }
+            }
+
+            let current = order(currentScores)
+            let previous = order(previousScores)
+            let currentRank = Dictionary(uniqueKeysWithValues: current.enumerated().map { ($0.element, $0.offset + 1) })
+            let previousRank = Dictionary(uniqueKeysWithValues: previous.enumerated().map { ($0.element, $0.offset + 1) })
+
+            return current.map { id in
+                Row(
+                    id: id,
+                    score: currentScores[id] ?? 0,
+                    previous: previousScores[id] ?? 0,
+                    rank: currentRank[id] ?? players.count,
+                    previousRank: previousRank[id] ?? players.count
+                )
+            }
+        }
+    }
 }

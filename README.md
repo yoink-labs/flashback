@@ -7,21 +7,21 @@ A free, open-source [Photo Roulette](https://photoroulette.app) party game with 
 - **Platforms:** native SwiftUI iOS 18+ (iPhone, iPad, iPhone Duo) and a full web app. Phone and browser players share the same rooms.
 - **Identity:** guest play with a 6-character room code and a nickname (no account), **or** optional sign-in with the existing Yoink Labs Clerk instance used by Wanderer, Split, and yoinklabs.dev.
 - **Realtime:** a Cloudflare Worker with one Durable Object per room, over WebSockets
-- **Media:** photos and 5–8 second video clips, uploaded only for the active game and deleted when each round ends
+- **Media:** photos and 6-second video clips. Nothing is uploaded in the lobby: each round, one player's device sends one item just before that round, the room relays it over the WebSocket, and nothing is ever stored
 
-The architecture, gameplay, auth model, media pipeline, and conventions are in [docs/SPEC.md](docs/SPEC.md).
+The architecture, gameplay, auth model, media pipeline, and conventions are in [docs/SPEC.md](docs/SPEC.md). Milestone 2 (turn-time uploads, everyone guesses, zero storage, new UI) is in [docs/MILESTONE2.md](docs/MILESTONE2.md) and overrides the spec where they differ.
 
 ## Play
 
-1. Create a room, or join with a code, QR code, or share link (`https://flashback.yoinklabs.dev/join/ABC234`) and a nickname.
-2. The host picks rounds, timer, and **Photos**, **Videos**, or **Both**.
-3. Everyone adds at least one photo or video and readies up. The host starts when all players are ready (2 or more, up to 12).
-4. Each round shows one random item from someone's pool: a photo, or a muted looping clip you can unmute. Guess whose it is.
-5. See the reveal and scores, then a final podium. Play again in the same room.
+1. Create a room, or join with a code, QR code, or share link (`https://flashback.yoinklabs.dev/join/ABC234`). Before you pick a nickname you see the room: host, players, mode, and rounds.
+2. The host picks rounds (1–30), timer, and **Photos**, **Videos**, or **Mix**.
+3. Everyone builds a **deck** on their own device: on iOS, a random shuffle from your library (or items you choose); on the web, files you pick. You see every photo and video in it and can hide any of them. The deck never leaves your device. Ready up; the host starts when everyone is ready (2 or more, up to 12).
+4. Each round the server picks whose turn it is, and that player's device quietly uploads one random item from their deck while the previous round is still on screen. Nobody is told whose it is, including the owner. Guess whose it is; you can pick anyone, yourself included.
+5. See the reveal and scores, then a final podium. Play again in the same room with the same decks.
 
 ### Scoring
 
-A correct guess earns **500** for accuracy, up to **500** for speed (`round(500 × time left ÷ round time)`), and **100 per previous consecutive correct guess** (capped at 500). Wrong, late, and missing guesses earn 0 and reset the streak. The owner sits their round out. Ties: rounds rank earlier guesses first; the podium ranks less total time on correct guesses first, then join order. The server computes scores (`worker/src/scoring.ts`); iOS mirrors the formula for hints (`Flashback/Core/Scoring.swift`), and both are tested against the same cases.
+A correct guess earns **500** for accuracy, up to **500** for speed (`round(500 × time left ÷ round time)`), and **100 per previous consecutive correct guess** (capped at 500). Wrong, late, and missing guesses earn 0 and reset the streak. The owner guesses like everyone else so nobody can tell whose it is, but since they always know their own item, their guess is a decoy: it scores 0 and leaves their streak alone. Ties: rounds rank earlier guesses first; the podium ranks less total time on correct guesses first, then join order. The server computes scores (`worker/src/scoring.ts`); iOS mirrors the formula for hints (`Flashback/Core/Scoring.swift`), and both are tested against the same cases.
 
 ## How sign-in works
 
@@ -36,10 +36,11 @@ Every authenticated call (WebSocket, upload, media, leave) accepts **either** a 
 
 ## Media and privacy
 
-- **iOS:** "Pick for me" chooses random photos and videos with PhotoKit (full or limited access), or players choose with the system photo picker (no permission needed). Photos become a ≤1600 px JPEG with no metadata. Videos become a random 6-second H.264 MP4 clip (≤8 MB, metadata stripped) via `AVAssetExportSession`. Originals and library identifiers never leave the phone.
-- **Web:** photos are decoded, resized, and re-encoded as JPEG (dropping EXIF/GPS). Videos are trimmed and re-encoded in the browser with WebCodecs and [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) to the same clip format. If a browser cannot do that, it says so and uploads nothing.
-- **Server:** accepts only JPEG (≤3 MB, EXIF/XMP/comments stripped again) and H.264 MP4 (≤8 MB, 1–8 s, checked by reading the MP4 boxes). Up to 10 items per player per game.
-- **Storage:** R2 keys are `rooms/<code>/<room instance>/g<game>/<random id>`. During a reveal, players fetch the round's item from a 256-bit capability URL that also needs their session, and only while the reveal lasts. Media is deleted when its round ends, when the game ends (unused items), when its owner leaves, and when the room closes. A 2-hour TTL alarm in the Durable Object is a backstop. Nothing is written to D1, and logs never contain media or media URLs.
+- **Only what is shown is sent.** Your deck stays on your device. One item is prepared (compressed or trimmed) ahead of time, uploaded only when the server asks for your turn, and only that one leaves the device. Hidden items are never sent; on iOS, items you hide are remembered so they are never picked again.
+- **iOS:** decks come from PhotoKit (full or limited access) or the system photo picker (no permission needed). Photos become a ≤1440 px JPEG with no metadata. Videos become a random 6-second, ≤720p H.264 MP4 clip (metadata stripped) via `AVAssetExportSession`. Originals and library identifiers never leave the phone.
+- **Web:** photos are decoded, resized, and re-encoded as JPEG (dropping EXIF/GPS). Videos are trimmed and re-encoded in the browser with WebCodecs and [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) to the same clip format. If a browser cannot do that, it skips that file and tries another.
+- **Server:** accepts only JPEG (≤3 MB, EXIF/XMP/comments stripped again) and H.264 MP4 (≤8 MB, 1–8 s, checked by reading the MP4 boxes), and only for a turn it asked that player for.
+- **No storage at all.** The room's Durable Object keeps the round's item in memory only and pushes it to the other players as one binary WebSocket frame; the owner shows its own copy. It is dropped when the round ends, the game ends, or the room closes. Nothing goes to R2, D1, KV, or Durable Object storage, and logs never contain media. There is nothing to clean up.
 - Rooms close 2 minutes after everyone disconnects, 15 minutes after a finished game, or after an hour idle in the lobby. Dropped players keep their seat for 90 seconds. If the host leaves or drops, the longest-present player becomes host.
 
 ## Development
@@ -75,7 +76,7 @@ Never put secrets in source, logs, `.env`, or `.dev.vars`. See `worker/.env.exam
 
 Flashback is live at https://flashback.yoinklabs.dev. The one-time setup is done:
 
-1. **R2:** bucket `flashback-media` in the Yoink Labs Cloudflare account (`2bc9c3c136a62ea9dcbddaa6f59edca4`), with lifecycle rule `rooms-backstop` deleting objects under `rooms/` after 1 day.
+1. **R2:** not used since Milestone 2. The old bucket `flashback-media` (Yoink Labs Cloudflare account `2bc9c3c136a62ea9dcbddaa6f59edca4`, 1-day lifecycle rule `rooms-backstop`) is no longer bound to the Worker and can be deleted.
 2. **Worker:** `flashback` (Durable Object class `Room` with SQLite storage, free plan). Redeploy with `npm run build --prefix web && npm run deploy --prefix worker`.
 3. **DNS / route:** `flashback.yoinklabs.dev` is the Worker's custom domain (`routes` in `worker/wrangler.jsonc`).
 4. **Clerk:** `flashback.yoinklabs.dev` is on the shared production instance's allowed subdomains, and `com.yoinklabs.flashback` (team `64PUT29XZ8`) is a native iOS app with redirect `com.yoinklabs.flashback://callback`. OAuth settings were not changed.

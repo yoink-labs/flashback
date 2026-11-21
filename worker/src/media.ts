@@ -8,9 +8,6 @@ export const VIDEO_MAX_BYTES = 8 * 1024 * 1024;
 export const VIDEO_MIN_MS = 1_000;
 /** Clips target 5–8 seconds; allow a little muxer slack over 8 s. */
 export const VIDEO_MAX_MS = 8_500;
-export const ITEMS_PER_PLAYER = 10;
-/** Backstop only. Media is deleted when its round, the game, or the room ends. */
-export const MEDIA_TTL_MS = 2 * 60 * 60 * 1000;
 
 export class MediaError extends Error {
   constructor(public status: number, message: string) {

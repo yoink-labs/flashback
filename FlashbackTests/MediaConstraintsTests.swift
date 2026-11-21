@@ -39,7 +39,8 @@ final class MediaConstraintsTests: XCTestCase {
     }
 
     func testFitNeverUpscales() {
-        XCTAssertEqual(MediaConstraints.fit(CGSize(width: 4032, height: 3024)), CGSize(width: 1600, height: 1200))
+        XCTAssertEqual(MediaConstraints.photoMaxPixel, 1440)
+        XCTAssertEqual(MediaConstraints.fit(CGSize(width: 4032, height: 3024)), CGSize(width: 1440, height: 1080))
         XCTAssertEqual(MediaConstraints.fit(CGSize(width: 800, height: 600)), CGSize(width: 800, height: 600))
         XCTAssertEqual(MediaConstraints.fit(.zero), .zero)
     }
@@ -51,8 +52,6 @@ final class MediaConstraintsTests: XCTestCase {
         XCTAssertEqual(Set(picks).count, 5)
         XCTAssertTrue(picks.allSatisfy { (0..<100).contains($0) })
         XCTAssertEqual(MediaConstraints.randomIndices(count: 5, total: 2, using: &rng).count, 2)
-        XCTAssertEqual(MediaConstraints.slots(used: 3), 7)
-        XCTAssertEqual(MediaConstraints.slots(used: 12), 0)
     }
 
     func testPhotoCompressionResizesAndStripsLocation() throws {
@@ -72,8 +71,8 @@ final class MediaConstraintsTests: XCTestCase {
         let out = CGImageSourceCreateWithData(compressed as CFData, nil)!
         let props = CGImageSourceCopyPropertiesAtIndex(out, 0, nil) as! [CFString: Any]
         XCTAssertNil(props[kCGImagePropertyGPSDictionary])
-        XCTAssertEqual(props[kCGImagePropertyPixelWidth] as? Int, 1600)
-        XCTAssertEqual(props[kCGImagePropertyPixelHeight] as? Int, 1067)
+        XCTAssertEqual(props[kCGImagePropertyPixelWidth] as? Int, 1440)
+        XCTAssertEqual(props[kCGImagePropertyPixelHeight] as? Int, 960)
         XCTAssertLessThanOrEqual(compressed.count, MediaConstraints.photoMaxBytes)
         XCTAssertThrowsError(try MediaProcessor.compressPhoto(Data("not an image".utf8)))
     }

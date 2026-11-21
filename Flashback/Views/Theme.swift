@@ -1,49 +1,86 @@
 import SwiftUI
 
+extension Color {
+    /// `Color(hex: 0xFF4F64)`.
+    init(hex: UInt32) {
+        self.init(
+            .sRGB,
+            red: Double((hex >> 16) & 0xFF) / 255,
+            green: Double((hex >> 8) & 0xFF) / 255,
+            blue: Double(hex & 0xFF) / 255,
+            opacity: 1
+        )
+    }
+}
+
+/// The v2 tokens from docs/DESIGN.md. Dark only, flat background, one accent.
+/// There are no gradients anywhere: colour comes from avatars and the accent.
 enum Palette {
-    static let accent = Color(red: 1, green: 0.365, blue: 0.561)
-    static let sun = Color(red: 1, green: 0.81, blue: 0.29)
-    static let cool = Color(red: 0.486, green: 0.906, blue: 1)
-    static let good = Color(red: 0.35, green: 0.89, blue: 0.63)
-    static let bad = Color(red: 1, green: 0.48, blue: 0.48)
-    static let night = Color(red: 0.08, green: 0.05, blue: 0.15)
-    static let backdrop = LinearGradient(colors: [Color(red: 0.23, green: 0.11, blue: 0.42), night, Color(red: 0.35, green: 0.09, blue: 0.25)], startPoint: .topLeading, endPoint: .bottomTrailing)
-}
+    static let bg = Color(hex: 0x0E0D12)
+    static let surface = Color(hex: 0x1A1820)
+    static let surface2 = Color(hex: 0x24212C)
+    static let line = Color(hex: 0x2C2935)
+    static let text = Color(hex: 0xF5F4F7)
+    static let text2 = Color(hex: 0x9C98A8)
+    static let text3 = Color(hex: 0x6B6777)
+    static let accent = Color(hex: 0xFF4F64)
+    static let good = Color(hex: 0x3DDC97)
+    static let bad = Color(hex: 0xFF6B6B)
+    static let gold = Color(hex: 0xFFC94A)
 
-struct Card<Content: View>: View {
-    @ViewBuilder var content: Content
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) { content }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    /// Twelve vivid colours assigned by join order, everywhere an avatar shows.
+    static let playerColors: [Color] = [
+        Color(hex: 0xFF6B6B), Color(hex: 0xFFB547), Color(hex: 0xFFE066), Color(hex: 0x6BE675),
+        Color(hex: 0x2EE5C5), Color(hex: 0x4FC3FF), Color(hex: 0x7C8CFF), Color(hex: 0xB07CFF),
+        Color(hex: 0xFF7AD9), Color(hex: 0xFF9A5A), Color(hex: 0xB7E34A), Color(hex: 0xD9D6E0),
+    ]
+
+    static func playerColor(_ index: Int) -> Color {
+        let count = playerColors.count
+        return playerColors[((index % count) + count) % count]
     }
 }
 
-struct PrimaryButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var enabled
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.headline)
-            .frame(maxWidth: .infinity, minHeight: 50)
-            .foregroundStyle(.white)
-            .background(LinearGradient(colors: [Palette.accent, Color(red: 1, green: 0.54, blue: 0.36)], startPoint: .leading, endPoint: .trailing), in: Capsule())
-            .opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.45)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+/// SF Pro Rounded roles from the spec.
+extension Font {
+    /// Rounded system font at an explicit size and weight.
+    static func fl(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .rounded)
     }
+
+    static var flTitle: Font { .fl(28, .heavy) }
+    static var flHeadline: Font { .fl(20, .bold) }
+    static var flBody: Font { .fl(17, .regular) }
+    static var flBodyMedium: Font { .fl(17, .medium) }
+    static var flCaption: Font { .fl(13, .semibold) }
 }
 
-extension ButtonStyle where Self == PrimaryButtonStyle { static var primary: PrimaryButtonStyle { .init() } }
+/// 4-pt grid spacing from the spec.
+enum Spacing {
+    static let pageCompact: CGFloat = 20
+    static let pageWide: CGFloat = 32
+    static let section: CGFloat = 28
+    static let row: CGFloat = 56
+    static let tileGap: CGFloat = 3
+}
 
-struct Avatar: View {
-    var name: String
-    var size: CGFloat = 34
-    var body: some View {
-        Text(name.first.map { String($0).uppercased() } ?? "?")
-            .font(.system(size: size * 0.45, weight: .heavy, design: .rounded))
-            .foregroundStyle(Palette.night)
-            .frame(width: size, height: size)
-            .background(LinearGradient(colors: [Palette.cool, Color(red: 0.55, green: 0.43, blue: 1)], startPoint: .topLeading, endPoint: .bottomTrailing), in: Circle())
-            .accessibilityHidden(true)
+enum Radius {
+    static let tile: CGFloat = 14
+    static let media: CGFloat = 18
+}
+
+/// 0.25 s spring for state changes; Reduce Motion fades instead.
+enum Motion {
+    static func state(_ reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.82)
+    }
+
+    /// A slightly softer spring for things that grow (locked-in avatar, count-up).
+    static func pop(_ reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.72)
+    }
+
+    static func phase(_ reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86)
     }
 }
