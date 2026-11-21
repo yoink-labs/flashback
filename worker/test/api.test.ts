@@ -4,8 +4,8 @@
 import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { useClerkKeysForTesting } from '../src/clerk';
-import { COUNTDOWN_MS, UPLOAD_TIMEOUT_MS, type RoomView } from '../src/game';
-import type { Room } from '../src/room';
+import { COUNTDOWN_MS, HOST_GRACE_MS, UPLOAD_TIMEOUT_MS, type RoomView } from '../src/game';
+import { MESSAGE_LIMIT, MESSAGE_WINDOW_MS, type Room } from '../src/room';
 import { clerkFixture, fakeJpeg, fakeMp4 } from './helpers';
 
 const base = 'https://flashback.test';
@@ -45,10 +45,12 @@ type Message = {
   state?: RoomView;
   message?: string;
   reason?: string;
+  request?: string;
   slot?: string;
   game?: number;
   round?: number;
   mode?: string;
+  kind?: string;
   serverNow?: number;
 };
 
@@ -202,10 +204,10 @@ async function setDeterministicRandom(code: string) {
   });
 }
 
-/** Gives everyone a photo deck and readies them up. */
+/** Gives everyone a full photo and video bunch and readies them up. */
 async function readyAll(sockets: SocketHandle[]) {
-  for (const socket of sockets) socket.send({ type: 'deck', photos: 3, videos: 0 });
-  await sockets[0].state((s) => s.players.every((p) => p.deck.photos === 3));
+  for (const socket of sockets) socket.send({ type: 'deck', photos: 12, videos: 6 });
+  await sockets[0].state((s) => s.players.every((p) => p.deck.photos === 12 && p.deck.videos === 6));
   for (const socket of sockets) socket.send({ type: 'ready', ready: true });
   await sockets[0].state((s) => s.players.every((p) => p.ready));
 }
@@ -230,7 +232,7 @@ describe('rooms over HTTP', () => {
       capacity: 12,
       joinable: true,
       host: 'Host',
-      settings: { rounds: 10, timerSeconds: 20, mediaMode: 'both' },
+      settings: { rounds: 10, timerSeconds: 20, mediaMode: 'both', breakSeconds: 7, swaps: 3 },
     });
   });
 
@@ -315,19 +317,19 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
       ['Bea', false, false],
       ['Cal', false, true],
     ]);
-    expect(lobby.startBlocker).toBe('Add a photo or video to your deck');
+    expect(lobby.startBlocker).toBe('Deal 12 photos and 6 videos');
 
     // Decks are reported over the socket and shown to everyone; no upload happens yet.
-    for (const socket of sockets) socket.send({ type: 'deck', photos: 3, videos: 0 });
-    const decked = await hostWS.state((s) => s.players.every((p) => p.deck.photos === 3));
+    for (const socket of sockets) socket.send({ type: 'deck', photos: 12, videos: 6 });
+    const decked = await hostWS.state((s) => s.players.every((p) => p.deck.photos === 12 && p.deck.videos === 6));
     expect(decked.players.every((p) => !('photos' in p) && !('videos' in p))).toBe(true);
     expect(decked.players.map((p) => p.deck)).toEqual([
-      { photos: 3, videos: 0 },
-      { photos: 3, videos: 0 },
-      { photos: 3, videos: 0 },
+      { photos: 12, videos: 6 },
+      { photos: 12, videos: 6 },
+      { photos: 12, videos: 6 },
     ]);
 
-    hostWS.send({ type: 'settings', rounds: 2, timerSeconds: 20, mediaMode: 'both' });
+    hostWS.send({ type: 'settings', rounds: 2, timerSeconds: 20, mediaMode: 'photos' });
     await hostWS.state((s) => s.settings.rounds === 2);
     beaWS.send({ type: 'settings', rounds: 5 });
     expect((await beaWS.next((m) => m.type === 'error')).message).toMatch(/Only the host/);
@@ -347,8 +349,8 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
     const round1 = startedTurns.find((entry) => entry.turn.round === 1)!;
     const round2 = startedTurns.find((entry) => entry.turn.round === 2)!;
     expect(round1.socket.playerID).not.toBe(round2.socket.playerID);
-    expect(round1.turn).toMatchObject({ game: 1, round: 1, mode: 'both' });
-    expect(round2.turn).toMatchObject({ game: 1, round: 2, mode: 'both' });
+    expect(round1.turn).toMatchObject({ game: 1, round: 1, mode: 'photos', kind: 'photo' });
+    expect(round2.turn).toMatchObject({ game: 1, round: 2, mode: 'photos', kind: 'photo' });
     expect(round1.turn.slot).not.toBe(round2.turn.slot);
 
     const owner1Token = tokenOf.get(round1.socket.playerID)!;
@@ -442,7 +444,7 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
     live.get(host.playerID)!.send({ type: 'playAgain' });
     const again = await live.get(cal.playerID)!.state((s) => s.phase === 'lobby' && s.game === 2);
     expect(again.players).toHaveLength(3);
-    expect(again.settings).toEqual({ rounds: 2, timerSeconds: 20, mediaMode: 'both' });
+    expect(again.settings).toEqual({ rounds: 2, timerSeconds: 20, mediaMode: 'photos', breakSeconds: 7, swaps: 3 });
     // There is no lobby upload path any more.
     expect((await upload(code, host.token, fakeJpeg(), 'image/jpeg', round1.turn.slot!)).status).toBe(409);
     for (const handle of [...sockets, reconnected, extra, ownerAgain]) handle.ws.close(1000);
@@ -508,6 +510,95 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
     for (const handle of sockets) handle.ws.close(1000);
   });
 
+  it('rejects an upload of the wrong kind for the round', async () => {
+    const host = await create('Host');
+    const bea = await join(host.code, 'Bea');
+    const code = host.code;
+    await setClock(code, Date.now());
+    await setDeterministicRandom(code);
+    const sessions = [host, bea];
+    const sockets = await Promise.all(sessions.map((session) => socket(code, session.token, session.playerID)));
+    const tokenOf = new Map(sessions.map((session) => [session.playerID, session.token]));
+    await readyAll(sockets);
+
+    sockets[0].send({ type: 'start' });
+    await sockets[0].state((s) => s.phase === 'countdown');
+    const turn = (await turnsOn(sockets, (m) => m.type === 'turn' && m.round === 1))[0];
+    expect(turn).toBeDefined();
+    const token = tokenOf.get(turn.socket.playerID)!;
+    expect(turn.turn.kind).toMatch(/photo|video/);
+    const photo = turn.turn.kind === 'photo';
+
+    const rejected = await upload(code, token, photo ? fakeMp4() : fakeJpeg(), photo ? 'video/mp4' : 'image/jpeg', turn.turn.slot!);
+    expect(rejected.status).toBe(422);
+    expect((await rejected.json<{ error: string }>()).error).toMatch(photo ? /needs a photo/ : /needs a video/);
+
+    // The round's own kind still lands on the same turn.
+    expect((await upload(code, token, photo ? fakeJpeg() : fakeMp4(), photo ? 'image/jpeg' : 'video/mp4', turn.turn.slot!)).status).toBe(201);
+    for (const handle of sockets) handle.ws.close(1000);
+  });
+
+  it('wires settings, pause, and resume over the socket (host only)', async () => {
+    const host = await create('Host');
+    const bea = await join(host.code, 'Bea');
+    const code = host.code;
+    const t0 = Date.now();
+    await setClock(code, t0);
+    await setDeterministicRandom(code);
+    const sessions = [host, bea];
+    const sockets = await Promise.all(sessions.map((session) => socket(code, session.token, session.playerID)));
+    const tokenOf = new Map(sessions.map((session) => [session.playerID, session.token]));
+    await readyAll(sockets);
+
+    // The new settings keys travel over the socket and are validated like the rest.
+    sockets[0].send({ type: 'settings', mediaMode: 'photos', breakSeconds: 5, swaps: 4 });
+    const configured = await sockets[0].state((s) => s.settings.breakSeconds === 5 && s.settings.swaps === 4);
+    expect(configured.settings).toEqual({ rounds: 10, timerSeconds: 20, mediaMode: 'photos', breakSeconds: 5, swaps: 4 });
+    sockets[0].send({ type: 'settings', breakSeconds: 2 });
+    expect((await sockets[0].next((m) => m.type === 'error' && m.request === 'settings')).message).toMatch(/Break must be 3–30/);
+    sockets[0].send({ type: 'settings', swaps: 11 });
+    expect((await sockets[0].next((m) => m.type === 'error' && m.request === 'settings')).message).toMatch(/Swaps must be 0–10/);
+
+    sockets[0].send({ type: 'start' });
+    await sockets[0].state((s) => s.phase === 'countdown');
+    const turn = (await turnsOn(sockets, (m) => m.type === 'turn' && m.round === 1))[0];
+    expect(turn).toBeDefined();
+    expect(turn.turn.kind).toBe('photo');
+    expect((await upload(code, tokenOf.get(turn.socket.playerID)!, fakeJpeg(), 'image/jpeg', turn.turn.slot!)).status).toBe(201);
+    await sockets[0].state((s) => s.phase === 'countdown' && s.round !== null && 'waiting' in s.round && s.round.waiting === false);
+
+    await setClock(code, t0 + COUNTDOWN_MS);
+    expect(await runDurableObjectAlarm(stub(code))).toBe(true);
+    const reveal = await sockets[0].state((s) => s.phase === 'reveal' && s.paused === false);
+    expect(reveal.pausedRemainingMs).toBeNull();
+
+    // Guests cannot pause.
+    sockets[1].send({ type: 'pause' });
+    expect((await sockets[1].next((m) => m.type === 'error' && m.request === 'pause')).message).toMatch(/Only the host/);
+
+    const pausedAt = t0 + COUNTDOWN_MS + 1_000;
+    await setClock(code, pausedAt);
+    sockets[0].send({ type: 'pause' });
+    const paused = await sockets[1].state((s) => s.paused);
+    expect(paused).toMatchObject({ phase: 'reveal', phaseEndsAt: null, paused: true, pausedRemainingMs: 20_000 - 1_000 });
+
+    sockets[1].send({ type: 'guess', targetID: host.playerID });
+    expect((await sockets[1].next((m) => m.type === 'error' && m.request === 'guess')).message).toBe('The game is paused.');
+
+    await setClock(code, pausedAt + 60_000);
+    sockets[0].send({ type: 'resume' });
+    const resumed = await sockets[1].state((s) => s.phaseEndsAt === t0 + COUNTDOWN_MS + 20_000 + 60_000);
+    expect(resumed.paused).toBe(false);
+    expect(resumed.pausedRemainingMs).toBeNull();
+
+    // Ending the game while paused still works and clears the pause.
+    sockets[0].send({ type: 'end' });
+    const podium = await sockets[0].state((s) => s.phase === 'podium');
+    expect(podium.paused).toBe(false);
+    expect(podium.pausedRemainingMs).toBeNull();
+    for (const handle of sockets) handle.ws.close(1000);
+  });
+
   it('transfers host on disconnect and tears down empty rooms without stored media', async () => {
     const host = await create('Host');
     const bea = await join(host.code, 'Bea');
@@ -519,6 +610,10 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
     await beaWS.state((s) => s.players.every((p) => p.connected));
 
     hostWS.ws.close(1000);
+    // A dropped host keeps the role for HOST_GRACE_MS (app switch), then it moves on.
+    await beaWS.state((s) => !s.players.find((p) => p.id === host.playerID)!.connected && s.hostID === host.playerID);
+    await setClock(code, t0 + HOST_GRACE_MS);
+    expect(await runDurableObjectAlarm(stub(code))).toBe(true);
     const transferred = await beaWS.state((s) => s.hostID === bea.playerID);
     expect(transferred.players.find((p) => p.id === host.playerID)!.connected).toBe(false);
 
@@ -537,6 +632,26 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
 });
 
 describe('misc', () => {
+  it('rate-limits a socket that floods the room with messages', async () => {
+    const host = await create('Host');
+    const code = host.code;
+    const t0 = Date.now();
+    await setClock(code, t0);
+    const hostWS = await socket(code, host.token, host.playerID);
+    await hostWS.state((s) => s.players.length === 1);
+
+    for (let i = 0; i < MESSAGE_LIMIT; i++) hostWS.send({ type: 'deck', photos: 1, videos: 1 });
+    await hostWS.state((s) => s.players[0].deck.photos === 1);
+    hostWS.send({ type: 'deck', photos: 2, videos: 2 });
+    expect((await hostWS.next((m) => m.type === 'error' && m.request === 'deck')).message).toMatch(/Slow down/);
+
+    // The dropped message was never applied; the next window accepts it.
+    await setClock(code, t0 + MESSAGE_WINDOW_MS);
+    hostWS.send({ type: 'deck', photos: 2, videos: 2 });
+    await hostWS.state((s) => s.players[0].deck.photos === 2);
+    hostWS.ws.close(1000);
+  });
+
   it('serves health and the app-site association', async () => {
     expect(await (await SELF.fetch(`${base}/health`)).json()).toEqual({ service: 'flashback', status: 'ok' });
     const aasa = await (await SELF.fetch(`${base}/.well-known/apple-app-site-association`)).json<{ applinks: { details: { appIDs: string[] }[] } }>();
@@ -549,13 +664,16 @@ describe('misc', () => {
     const code = host.code;
     await setClock(code, Date.now());
     const sockets = [await socket(code, host.token, host.playerID), await socket(code, bea.token, bea.playerID)];
-    for (const socket of sockets) socket.send({ type: 'deck', photos: 0, videos: 2 });
-    await sockets[0].state((s) => s.players.every((p) => p.deck.videos === 2));
+    sockets[0].send({ type: 'settings', mediaMode: 'videos' });
+    await sockets[0].state((s) => s.settings.mediaMode === 'videos');
+    for (const socket of sockets) socket.send({ type: 'deck', photos: 0, videos: 6 });
+    await sockets[0].state((s) => s.players.every((p) => p.deck.videos === 6));
     for (const socket of sockets) socket.send({ type: 'ready', ready: true });
     await sockets[0].state((s) => s.players.every((p) => p.ready));
     sockets[0].send({ type: 'start' });
     await sockets[0].state((s) => s.phase === 'countdown');
     const turn = (await turnsOn(sockets, (m) => m.type === 'turn' && m.round === 1))[0];
+    expect(turn.turn.kind).toBe('video');
     const token = new Map([[host.playerID, host.token], [bea.playerID, bea.token]]).get(turn.socket.playerID)!;
 
     expect((await upload(code, token, fakeMp4({ durationMs: 20_000 }), 'video/mp4', turn.turn.slot!)).status).toBe(422);

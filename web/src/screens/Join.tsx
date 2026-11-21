@@ -6,9 +6,10 @@ import { isCode, joinRoom, normalizeCode, roomInfo, savedSession, type RoomInfo 
 import { Avatar } from '../ui/Avatar';
 import { CodeInput } from '../ui/CodeInput';
 import { TipPill } from '../ui/TipPill';
+import { BackIcon } from '../ui/Icons';
 import { NameInput, useNickname } from './Entry';
+import { modeWord } from '../room/Settings';
 
-const modeWord = (mode: string) => (mode === 'photos' ? 'Photos' : mode === 'videos' ? 'Videos' : 'Mix');
 
 export function JoinScreen() {
   const params = useParams();
@@ -62,7 +63,7 @@ export function JoinScreen() {
     <main className="screen join-screen">
       <header className="screen-head">
         <Link className="icon-btn" to="/" aria-label="Back to start">
-          ←
+          <BackIcon />
         </Link>
         <h1 className="title">Join a game</h1>
         <span className="screen-head-end">

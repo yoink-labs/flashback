@@ -1,0 +1,173 @@
+/* Settings sheet (host). */
+
+/* ---- settings sheet ---- */
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgb(8 7 12 / 0.72);
+  animation: fade-in 0.18s ease-out;
+}
+
+.sheet {
+  width: 100%;
+  max-width: 480px;
+  max-height: 92dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 8px calc(var(--pad) + env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) calc(var(--pad) + env(safe-area-inset-left));
+  border-radius: 22px 22px 0 0;
+  background: var(--surface);
+  animation: sheet-up 0.26s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+.sheet:focus {
+  outline: none;
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(40px);
+    opacity: 0;
+  }
+}
+
+.sheet-grabber {
+  align-self: center;
+  width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line);
+}
+
+@media (min-width: 600px) and (min-height: 600px) {
+  .sheet-backdrop {
+    align-items: center;
+    padding: 20px;
+  }
+  .sheet {
+    border-radius: var(--radius-media);
+    padding: 24px;
+  }
+  .sheet-grabber {
+    display: none;
+  }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+}
+
+.sheet-done {
+  min-height: 44px;
+  padding: 0 4px 0 12px;
+  color: var(--accent);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.setting {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.setting-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.setting-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.segmented button {
+  height: 40px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-2);
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.segmented button.on {
+  background: var(--accent);
+  color: #fff;
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.stepper button {
+  width: 44px;
+  height: 40px;
+  border-radius: 999px;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+
+.stepper button:disabled {
+  color: var(--text-3);
+}
+
+.stepper output {
+  min-width: 36px;
+  text-align: center;
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.chips {
+  display: grid;
+  gap: 8px;
+}
+
+.chip {
+  height: 44px;
+  min-width: 0;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.chip.on {
+  background: var(--accent);
+  color: #fff;
+}

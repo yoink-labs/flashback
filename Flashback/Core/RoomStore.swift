@@ -3,43 +3,22 @@ import Foundation
 import SwiftUI
 import UIKit
 
-/// Looping, muted-by-default playback for the current reveal. Owned by the
-/// store (not a view) so folding or rotating never restarts or loses it. Each
-/// clip gets a fresh player so no state from an earlier round can linger.
-@MainActor final class PlaybackController: ObservableObject {
-    @Published private(set) var player: AVQueuePlayer?
-    @Published var muted = true { didSet { player?.isMuted = muted } }
-    private var looper: AVPlayerLooper?
-    private var file: URL?
-
-    func play(file url: URL) {
-        stop()
-        file = url
-        let player = AVQueuePlayer()
-        player.isMuted = muted
-        player.preventsDisplaySleepDuringVideoPlayback = true
-        looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
-        self.player = player
-        player.play()
-    }
-
-    /// Keeps the last frame visible (used on the results screen).
-    func pause() {
-        player?.pause()
-    }
-
-    func stop() {
-        player?.pause()
-        looper?.disableLooping()
-        looper = nil
-        player?.removeAllItems()
-        player = nil
-        if let file { try? FileManager.default.removeItem(at: file) }
-        file = nil
-    }
-}
-
 enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(String) }
+
+/// A short confirmation at the top of the room ("Saved", "Code copied").
+struct Toast: Equatable, Identifiable {
+    /// The one thing a toast can offer to do.
+    enum Action: Equatable { case openSettings }
+
+    var id = UUID()
+    var text: String
+    var symbol: String
+    var isError = false
+    var action: Action?
+
+    /// Toasts with an action stay long enough to reach it.
+    var duration: Duration { action == nil ? .seconds(2) : .seconds(5) }
+}
 
 /// All room state for the app: session, server view, connection, reveal media,
 /// the player's deck, and prepared uploads. Views are pure functions of this store.
@@ -57,6 +36,8 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
     @Published var roomInfo: RoomInfo?
     @Published var previewLoading = false
     @Published var previewError: String?
+    @Published private(set) var toast: Toast?
+    @Published private(set) var saving = false
 
     let deck: DeckStore
     let playback = PlaybackController()
@@ -75,8 +56,12 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
     private var needMediaSent: Set<MediaKey> = []
     private var showingKey: MediaKey?
 
-    /// One processed item held ready. The turn upload uses it instantly.
-    private var prepared: PreparedItem?
+    /// The media showing in this reveal / results, kept so it can be saved.
+    private(set) var savable: MediaBlob?
+
+    /// One processed item per kind held ready; the turn upload uses it at once.
+    /// In Mix both kinds are kept warm, since the server says which kind a round is.
+    private var prepared: [MediaKind: PreparedItem] = [:]
     private var work: Task<Void, Never>?
     private var lastSentDeck: DeckCount?
 
@@ -87,6 +72,8 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
         var game: Int
         var round: Int
         var mode: MediaMode
+        /// The kind the server wants; nil from older servers (random by mode).
+        var kind: MediaKind? = nil
     }
 
     init(
@@ -98,7 +85,11 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
         self.vault = vault
         self.deck = deck ?? DeckStore()
         self.playback.muted = UserDefaults.standard.object(forKey: Self.muteDefaultsKey) as? Bool ?? true
-        self.deck.onChange = { [weak self] in self?.sendDeckIfNeeded() }
+        self.deck.onChange = { [weak self] in
+            self?.sendDeckIfNeeded()
+            // A swap or New bunch can retire a prepared item: drop it and warm another.
+            self?.prepareNext()
+        }
     }
 
     var serverNow: Double { Date().timeIntervalSince1970 * 1000 + clockOffset }
@@ -138,13 +129,13 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
         error = nil
         showJoin = false
         attempt = 0
-        prepared = nil
+        prepared.removeAll()
         lastSentDeck = nil
         media.removeAll()
         needMediaSent.removeAll()
         roomInfo = nil
         previewError = nil
-        deck.resetUsed()
+        deck.resetForNewRoom()
         connect()
     }
 
@@ -176,7 +167,7 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
         clearReveal()
         media.removeAll()
         needMediaSent.removeAll()
-        prepared = nil
+        prepared.removeAll()
         lastSentDeck = nil
         connection = .closed(reason)
     }
@@ -300,7 +291,7 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
             vault.save(session)
         case "turn":
             guard let slot = message.slot, let game = message.game, let round = message.round, let mode = message.mode else { return }
-            beginTurn(TurnRequest(slot: slot, game: game, round: round, mode: mode))
+            beginTurn(TurnRequest(slot: slot, game: game, round: round, mode: mode, kind: message.kind))
         case "closed":
             finish(reason: message.reason ?? "room-closed")
         default:
@@ -321,6 +312,7 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
     func apply(_ state: RoomView) {
         let old = view
         view = state
+        deck.configure(state.settings)
         haptics(from: old, to: state)
         sendDeckIfNeeded(force: lastSentDeck == nil)
 
@@ -332,7 +324,6 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
         case .results:
             // Keep the last frame and the photo for the small results thumbnail,
             // and free every older round's bytes.
-            playback.pause()
             if let ended = state.lastResult?.index {
                 media = media.filter { $0.key.round > ended }
             }
@@ -344,20 +335,31 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
             }
         }
 
-        // Keep a prepared item warm; drop it only when it is no longer valid for
-        // the room (unready, mode change, deck change).
+        syncPlayback()
+
+        // Keep prepared items warm; drop them only when they are no longer valid
+        // for the room (unready, mode change, bunch change).
         if state.phase == .lobby, state.me?.ready != true {
-            prepared = nil
+            prepared.removeAll()
         }
-        if let current = prepared {
-            let stillInDeck = deck.item(current.itemID) != nil
-            if !stillInDeck || !MediaConstraints.allows(state.settings.mediaMode, current.kind) {
-                prepared = nil
-            }
-        }
+        dropStalePrepared()
         if state.phase == .lobby, state.me?.ready == true {
             prepareNext()
         }
+    }
+
+    /// A prepared item is only good while it is still in a bunch the room uses.
+    private func isCurrent(_ item: PreparedItem) -> Bool {
+        deck.item(item.itemID) != nil && MediaConstraints.allows(view?.settings.mediaMode ?? .both, item.kind)
+    }
+
+    private func dropStalePrepared() {
+        prepared = prepared.filter { isCurrent($0.value) }
+    }
+
+    /// The clip plays only in an unpaused reveal; results and a pause hold its frame.
+    private func syncPlayback() {
+        if view?.phase == .reveal && view?.paused == false { playback.resume() } else { playback.pause() }
     }
 
     private func haptics(from old: RoomView?, to new: RoomView) {
@@ -421,20 +423,32 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
     }
 
     private func prepareNext() {
-        guard prepared == nil, let view, session != nil else { return }
+        dropStalePrepared()
+        guard let view, session != nil else { return }
         guard view.phase != .lobby || view.me?.ready == true else { return }
         let mode = view.settings.mediaMode
-        enqueue { [weak self] in
-            guard let self, self.session != nil, self.prepared == nil else { return }
-            self.prepared = await self.processNext(mode: mode)
+        for kind in DeckState.kinds(mode) where prepared[kind] == nil {
+            enqueue { [weak self] in
+                guard let self, self.session != nil else { return }
+                self.dropStalePrepared()
+                guard self.prepared[kind] == nil else { return }
+                // The item can be swapped out while it is being processed: try once more.
+                for _ in 0..<2 {
+                    guard let item = await self.processNext(mode: mode, kind: kind) else { break }
+                    if self.isCurrent(item) {
+                        self.prepared[kind] = item
+                        break
+                    }
+                }
+            }
         }
     }
 
-    private func processNext(mode: MediaMode) async -> PreparedItem? {
+    private func processNext(mode: MediaMode, kind: MediaKind?) async -> PreparedItem? {
         var attempts = 0
         while attempts < 6 {
             attempts += 1
-            guard let item = deck.randomCandidate(mode: mode) else { return nil }
+            guard let item = deck.randomCandidate(mode: mode, kind: kind) else { return nil }
             do {
                 return try await deck.prepare(item)
             } catch {
@@ -445,15 +459,12 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
         return nil
     }
 
-    private func currentPrepared(mode: MediaMode) -> PreparedItem? {
-        guard let prepared else { return nil }
-        guard let item = deck.item(prepared.itemID),
-              !deck.isHidden(item.id),
-              MediaConstraints.allows(mode, prepared.kind) else {
-            self.prepared = nil
-            return nil
-        }
-        return prepared
+    /// The warm item for this turn: the asked-for kind, or (older servers) a
+    /// random allowed kind.
+    private func currentPrepared(mode: MediaMode, kind: MediaKind?) -> PreparedItem? {
+        dropStalePrepared()
+        if let kind { return prepared[kind] }
+        return DeckState.kinds(mode).compactMap { prepared[$0] }.randomElement()
     }
 
     private func serve(_ turn: TurnRequest) async {
@@ -468,13 +479,13 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
         while attempts < 3 && !uploaded {
             attempts += 1
             let item: PreparedItem?
-            if let ready = currentPrepared(mode: turn.mode) {
+            if let ready = currentPrepared(mode: turn.mode, kind: turn.kind) {
                 item = ready
             } else {
-                item = await processNext(mode: turn.mode)
+                item = await processNext(mode: turn.mode, kind: turn.kind)
             }
             guard let item else { break }
-            prepared = nil
+            prepared[item.kind] = nil
             do {
                 try await api.upload(item.data, kind: item.kind, slot: turn.slot, session: session)
                 // The owner keeps its own copy under the same (game, round) key.
@@ -521,6 +532,7 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
 
     private func present(_ blob: MediaBlob) {
         revealFailed = false
+        savable = blob
         switch blob.kind {
         case .photo:
             guard let image = UIImage(data: blob.bytes) else {
@@ -537,13 +549,79 @@ enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(S
                 return
             }
             playback.play(file: url)
+            syncPlayback()
         }
     }
 
     private func clearReveal() {
         showingKey = nil
+        savable = nil
         revealImage = nil
         revealFailed = false
         playback.stop()
     }
+
+    // MARK: - Host controls
+
+    func pause() {
+        guard view?.isHost == true, view?.canPause == true else { return }
+        Haptics.tick()
+        send(.pause)
+    }
+
+    func resumeGame() {
+        guard view?.isHost == true, view?.paused == true else { return }
+        Haptics.ready()
+        send(.resume)
+    }
+
+    // MARK: - Save and toasts
+
+    var canSave: Bool { savable != nil && (view?.phase == .reveal || view?.phase == .results) }
+
+    /// Saves this round's photo or clip to the player's library (add-only access).
+    /// Local only: it uses the bytes already on the phone.
+    func saveCurrentMedia() async {
+        guard let blob = savable, !saving else { return }
+        saving = true
+        defer { saving = false }
+        do {
+            try await MediaSaver.save(blob)
+            Haptics.saved()
+            show(Toast(text: blob.kind == .video ? "Clip saved" : "Saved", symbol: "checkmark.circle.fill"))
+        } catch {
+            Haptics.incorrect()
+            let denied = (error as? MediaSaver.SaveError) == .denied
+            show(Toast(text: error.localizedDescription, symbol: "exclamationmark.triangle.fill", isError: true, action: denied ? .openSettings : nil))
+        }
+    }
+
+    func copyCode() {
+        guard let code = view?.code else { return }
+        UIPasteboard.general.string = code
+        Haptics.tick()
+        show(Toast(text: "Code copied", symbol: "doc.on.doc.fill"))
+    }
+
+    func show(_ toast: Toast) {
+        self.toast = toast
+        let id = toast.id
+        Task { [weak self] in
+            try? await Task.sleep(for: toast.duration)
+            if self?.toast?.id == id { self?.toast = nil }
+        }
+    }
+
+    #if DEBUG
+    /// Screenshot fixtures: a room with no server or socket.
+    func debugLoad(_ state: RoomView, media: MediaBlob? = nil) {
+        session = RoomSession(code: state.code, playerID: state.you.id, nickname: state.me?.nickname ?? "You", token: "debug", expiresAt: 4_000_000_000, joinURL: RoomCode.joinURL(state.code).absoluteString)
+        connection = .open
+        clockOffset = state.serverNow - Date().timeIntervalSince1970 * 1000
+        if let media, let round = state.round?.index {
+            self.media[MediaKey(game: state.game, round: round)] = media
+        }
+        apply(state)
+    }
+    #endif
 }

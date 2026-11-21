@@ -5,110 +5,6 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-// The deck is the local, visible set of photos and videos a player is willing
-// to show. It never leaves the phone: the server only learns how many items fit
-// the room's media mode, and only the one item picked for a round is uploaded.
-
-struct DeckItem: Identifiable, Equatable {
-    enum Origin: Equatable {
-        case library(String)
-        case picked
-    }
-
-    var id: String
-    var kind: MediaKind
-    /// PhotoKit local identifier when this came from the library.
-    var assetID: String?
-    /// Compressed JPEG bytes for an item chosen with the system picker.
-    var photoData: Data?
-    /// Temporary MP4 for an item chosen with the system picker.
-    var videoFile: URL?
-    /// Seconds, for the duration badge.
-    var duration: Double?
-    var origin: Origin
-
-    static func library(_ asset: PHAsset) -> DeckItem {
-        let video = asset.mediaType == .video
-        return DeckItem(
-            id: asset.localIdentifier,
-            kind: video ? .video : .photo,
-            assetID: asset.localIdentifier,
-            photoData: nil,
-            videoFile: nil,
-            duration: video ? asset.duration : nil,
-            origin: .library(asset.localIdentifier)
-        )
-    }
-
-    var durationLabel: String? {
-        guard kind == .video, let duration, duration.isFinite, duration > 0 else { return nil }
-        let total = Int(duration.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-}
-
-/// Pure deck logic: visible/hidden/used filtering by media mode. Unit tested.
-struct DeckState: Equatable {
-    static let size = 24
-
-    var items: [DeckItem]
-    var hidden: Set<String>
-    var used: Set<String>
-
-    init(items: [DeckItem] = [], hidden: Set<String> = [], used: Set<String> = []) {
-        self.items = items
-        self.hidden = hidden
-        self.used = used
-    }
-
-    func fitting(_ mode: MediaMode) -> [DeckItem] {
-        items.filter { MediaConstraints.allows(mode, $0.kind) }
-    }
-
-    /// Unhidden items that fit the mode. Hidden items are never uploaded.
-    func visible(_ mode: MediaMode) -> [DeckItem] {
-        fitting(mode).filter { !hidden.contains($0.id) }
-    }
-
-    func counts(_ mode: MediaMode) -> DeckCount {
-        let visible = visible(mode)
-        return DeckCount(
-            photos: visible.filter { $0.kind == .photo }.count,
-            videos: visible.filter { $0.kind == .video }.count
-        )
-    }
-
-    func isHidden(_ id: String) -> Bool { hidden.contains(id) }
-
-    func item(_ id: String) -> DeckItem? { items.first { $0.id == id } }
-
-    /// Unused, visible items that fit the mode; when every item has been shown
-    /// this session the deck is allowed to start over.
-    func candidates(_ mode: MediaMode) -> [DeckItem] {
-        let visible = visible(mode)
-        let unused = visible.filter { !used.contains($0.id) }
-        return unused.isEmpty ? visible : unused
-    }
-
-    mutating func setHidden(_ id: String, _ hidden: Bool) {
-        if hidden { self.hidden.insert(id) } else { self.hidden.remove(id) }
-    }
-
-    mutating func markUsed(_ id: String) {
-        used.insert(id)
-    }
-
-    mutating func add(_ newItems: [DeckItem]) {
-        let existing = Set(items.map(\.id))
-        items.append(contentsOf: newItems.filter { !existing.contains($0.id) })
-    }
-
-    /// "Shuffle again" swaps the library picks and keeps items the player added by hand.
-    mutating func replaceLibrary(_ newItems: [DeckItem]) {
-        items = items.filter { $0.origin == .picked } + newItems
-    }
-}
-
 /// A processed item held in memory, ready to upload the moment it is asked for.
 struct PreparedItem: Equatable {
     var itemID: String
@@ -116,128 +12,260 @@ struct PreparedItem: Equatable {
     var data: Data
 }
 
-/// Owns the player's deck, its thumbnails, and on-demand processing. Reset-free:
-/// the deck lives here so folding, rotating, or leaving the lobby never loses it.
+/// Owns the player's bunches, their thumbnails, and on-demand processing.
+/// Everything lives here (not in views) so folding, rotating, or leaving the
+/// lobby never loses the bunch, the swaps, the open preview, or which step is
+/// showing. The rules live in `DeckState`; this class only feeds it items from
+/// PhotoKit or the system picker.
 @MainActor final class DeckStore: ObservableObject {
+    /// Same key as the old hidden list: swapped-out library ids, never dealt again.
     static let hiddenDefaultsKey = "flashback.hiddenAssets"
 
     @Published private(set) var state: DeckState
-    @Published private(set) var loading = false
-    @Published private(set) var note: String?
+    /// Kinds currently being dealt.
+    @Published private(set) var dealing: Set<MediaKind> = []
+    /// Tiles whose replacement is loading.
+    @Published private(set) var swapping: Set<String> = []
+    /// One short line per bunch ("Pick more photos to swap").
+    @Published private(set) var notes: [MediaKind: String] = [:]
+    /// Which bunch the lobby shows in Mix ("Photos" or "Videos" step).
+    @Published var step: MediaKind = .photo
+    /// The tile held open full screen (kept here so a fold doesn't close it).
+    @Published var previewing: DeckItem?
+    @Published private(set) var mode: MediaMode = .both
 
-    /// Called after the deck changes so `RoomStore` can report the new counts.
+    /// Called after the bunches change so `RoomStore` can report the new counts.
     var onChange: (@MainActor () -> Void)?
 
     private let defaults: UserDefaults
-    /// Hidden library identifiers, remembered across games on this device.
+    /// Swapped-out library identifiers, remembered across games on this device.
     private var hiddenAssets: Set<String>
     private let manager = PHCachingImageManager()
     private let thumbnails = NSCache<NSString, UIImage>()
+    /// System-picker items not loaded yet, keyed by pool id.
+    private var pickerItems: [String: PhotosPickerItem] = [:]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let hidden = Set(defaults.stringArray(forKey: Self.hiddenDefaultsKey) ?? [])
         self.hiddenAssets = hidden
-        self.state = DeckState(hidden: hidden)
+        self.state = DeckState(swappedOut: hidden)
     }
 
     var items: [DeckItem] { state.items }
     var used: Set<String> { state.used }
-    var isShuffling: Bool { loading }
+    var kinds: [MediaKind] { DeckState.kinds(mode) }
 
+    func bunch(_ kind: MediaKind) -> Bunch { state[kind] }
     func counts(mode: MediaMode) -> DeckCount { state.counts(mode) }
-    func isHidden(_ id: String) -> Bool { state.isHidden(id) }
     func item(_ id: String) -> DeckItem? { state.item(id) }
+    func isDealing(_ kind: MediaKind) -> Bool { dealing.contains(kind) }
+    func note(_ kind: MediaKind) -> String? { notes[kind] }
 
+    /// A deal or swap is still landing: Ready / Start wait, so the counts the
+    /// server sees are never from a half-applied bunch.
+    var isBusy: Bool { !dealing.isEmpty || !swapping.isEmpty }
+
+    /// The step the lobby should show: the chosen one when the room uses it.
+    var currentStep: MediaKind { kinds.contains(step) ? step : (kinds.first ?? .photo) }
+
+    /// Room settings arrived or changed: media mode and swaps (clamped).
+    func configure(_ settings: RoomSettings) {
+        let oldMode = mode
+        mode = settings.mediaMode
+        var next = state
+        next.configure(swaps: settings.swaps)
+        if next != state { state = next }
+        if !kinds.contains(step) { step = kinds.first ?? .photo }
+        if oldMode != mode { notes = [:]; notify() }
+    }
+
+    /// Shown (or unusable) this session. Not a bunch change: counts stay the same.
     func markUsed(_ id: String) {
-        guard !state.used.contains(id) else { return }
         state.markUsed(id)
-        notify()
     }
 
-    /// A new room starts the "already shown this session" bookkeeping over.
-    func resetUsed() {
-        guard !state.used.isEmpty else { return }
+    /// A new room starts the shown-this-session bookkeeping and the swaps over.
+    func resetForNewRoom() {
         state.used.removeAll()
+        state.swapLimit = nil
         notify()
     }
 
-    // MARK: - Building the deck
+    // MARK: - Dealing and swapping
 
-    func shuffle(mode: MediaMode) async {
-        guard !loading else { return }
-        loading = true
-        note = nil
-        defer { loading = false }
+    /// "Deal my photos" / "New bunch": a fresh random bunch of `kind` from the
+    /// library (or from the pool), with swaps reset.
+    func deal(_ kind: MediaKind) async {
+        guard !dealing.contains(kind) else { return }
+        dealing.insert(kind)
+        notes[kind] = nil
+        defer { dealing.remove(kind) }
 
-        let access = MediaLibrary.currentAccess == .denied ? await MediaLibrary.requestAccess() : MediaLibrary.currentAccess
-        guard access != .denied else {
-            note = MediaError.noAccess.localizedDescription
-            return
+        let size = DeckState.size(kind)
+        if state[kind].source == .picked, state.poolCount(kind) > 0 {
+            state.deal(kind, items: await draw(kind, count: size, from: .picked, replacing: false), source: .picked)
+        } else {
+            guard await libraryAccess(kind) else { return }
+            let fresh = await draw(kind, count: size, from: .library, replacing: false)
+            guard !fresh.isEmpty else {
+                notes[kind] = MediaError.nothingFound(kind == .photo ? .photos : .videos).localizedDescription
+                return
+            }
+            state.dealFromLibrary(kind, items: fresh)
         }
-        let excluding = hiddenAssets.union(state.items.filter { $0.origin != .picked }.map(\.id))
-        let assets = MediaLibrary.randomAssets(mode: mode, count: DeckState.size, excluding: excluding)
-        let fresh = assets.map(DeckItem.library)
-        guard !fresh.isEmpty else {
-            note = MediaError.nothingFound(mode).localizedDescription
-            return
-        }
-        state.replaceLibrary(fresh)
         notify()
     }
 
-    /// "Add specific…" from the system photo picker. Needs no library permission.
-    func addPicked(_ picked: [PhotosPickerItem], mode: MediaMode) async {
-        guard !picked.isEmpty, !loading else { return }
-        loading = true
-        note = nil
-        defer { loading = false }
+    /// Tap a tile: swap it for another random item, using one swap.
+    @discardableResult
+    func swap(_ id: String) async -> SwapResult {
+        guard let kind = state.kind(of: id) else { return .notFound }
+        guard state[kind].swapsLeft > 0 else { return .noSwapsLeft }
+        guard !swapping.contains(id) else { return .notFound }
+        swapping.insert(id)
+        defer { swapping.remove(id) }
 
-        var added: [DeckItem] = []
-        for pick in picked.prefix(DeckState.size) {
+        let swappedOut = state.item(id)
+        var result = SwapResult.nothingToDraw
+        // Two tiles swapping at once can draw the same replacement while the
+        // pool loads; the one that loses the race draws again.
+        for _ in 0..<2 {
+            let replacement = await draw(kind, count: 1, from: state[kind].source, replacing: true).first
+            result = state.swap(id, with: replacement)
+            guard result == .nothingToDraw, replacement != nil else { break }
+        }
+        switch result {
+        case .swapped:
+            notes[kind] = nil
+            if let assetID = swappedOut?.assetID {
+                hiddenAssets.insert(assetID)
+                defaults.set(Array(hiddenAssets), forKey: Self.hiddenDefaultsKey)
+            }
+            notify()
+        case .nothingToDraw:
+            notes[kind] = kind == .photo ? "Pick more photos to swap" : "Pick more videos to swap"
+        case .noSwapsLeft, .notFound:
+            break
+        }
+        return result
+    }
+
+    /// "Pick photos" / "Pick videos": the picks join the pool (by their own
+    /// kind), the bunch switches to drawing from it, and it is dealt (or its
+    /// empty slots topped up) right away. Nothing is loaded until it is dealt.
+    func addPicked(_ picked: [PhotosPickerItem], kind: MediaKind) async {
+        guard !picked.isEmpty else { return }
+        var poolItems: [DeckItem] = []
+        for pick in picked.prefix(DeckState.poolLimit) {
             let isVideo = pick.supportedContentTypes.contains { $0.conforms(to: .movie) }
-            do {
-                if isVideo {
-                    guard let movie = try await pick.loadTransferable(type: PickedMovie.self) else { continue }
-                    let movieAsset = AVURLAsset(url: movie.url)
-                    let duration = (try? await movieAsset.load(.duration))?.seconds
-                    let key = pick.itemIdentifier ?? UUID().uuidString
-                    added.append(DeckItem(id: "picked-\(key)", kind: .video, assetID: nil, photoData: nil, videoFile: movie.url, duration: duration, origin: .picked))
-                } else {
-                    guard let data = try await pick.loadTransferable(type: Data.self) else { continue }
-                    // Keep the deck small in memory: store the same compressed form we would upload.
-                    let compressed = (try? MediaProcessor.compressPhoto(data)) ?? data
-                    guard compressed.count <= MediaConstraints.photoMaxBytes else { continue }
-                    let key = pick.itemIdentifier ?? UUID().uuidString
-                    added.append(DeckItem(id: "picked-\(key)", kind: .photo, assetID: nil, photoData: compressed, videoFile: nil, duration: nil, origin: .picked))
-                }
-            } catch {
+            let id = "picked-\(pick.itemIdentifier ?? UUID().uuidString)"
+            // Picking the same item again (ids come from the shared library) is a no-op.
+            if !state.pool.contains(where: { $0.id == id }) { pickerItems[id] = pick }
+            poolItems.append(.pickedPlaceholder(id: id, kind: isVideo ? .video : .photo))
+        }
+        state.addToPool(poolItems)
+        guard !dealing.contains(kind) else { return }
+
+        dealing.insert(kind)
+        notes[kind] = nil
+        defer { dealing.remove(kind) }
+        let bunch = state[kind]
+        if bunch.source == .picked, !bunch.items.isEmpty {
+            let room = DeckState.size(kind) - bunch.items.count
+            state.topUp(kind, items: await draw(kind, count: room, from: .picked, replacing: true))
+        } else {
+            state.deal(kind, items: await draw(kind, count: DeckState.size(kind), from: .picked, replacing: false), source: .picked)
+        }
+        if state[kind].items.isEmpty { notes[kind] = "Couldn't read those items. Try different ones." }
+        notify()
+    }
+
+    /// Up to `count` new items of `kind`, best first. `replacing` leaves out
+    /// what is in the bunch now (swaps and top-ups).
+    private func draw(_ kind: MediaKind, count: Int, from source: Bunch.Source, replacing: Bool) async -> [DeckItem] {
+        guard count > 0 else { return [] }
+        switch source {
+        case .picked:
+            // A few spares, since a picked item can fail to load.
+            let candidates = state.drawFromPool(kind, count: count + 4, excludingBunch: replacing)
+            return await materialize(candidates, want: count)
+        case .library:
+            // Never-dealt first; when the library runs dry, allow ones dealt
+            // before (never swapped-out ones).
+            var assets = MediaLibrary.randomAssets(kind: kind, count: count, excluding: state.libraryExclusions(kind, strict: true, excludingBunch: replacing))
+            if assets.count < count {
+                let have = Set(assets.map(\.localIdentifier))
+                let relaxed = state.libraryExclusions(kind, strict: false, excludingBunch: replacing).union(have)
+                assets += MediaLibrary.randomAssets(kind: kind, count: count - assets.count, excluding: relaxed)
+            }
+            return assets.map(DeckItem.library)
+        }
+    }
+
+    private func libraryAccess(_ kind: MediaKind) async -> Bool {
+        let access = MediaLibrary.currentAccess == .denied ? await MediaLibrary.requestAccess() : MediaLibrary.currentAccess
+        guard access == .denied else { return true }
+        notes[kind] = kind == .photo
+            ? "Flashback can't see your photos. Use Pick photos instead."
+            : "Flashback can't see your videos. Use Pick videos instead."
+        return false
+    }
+
+    /// Loads picked pool items (compressed photo bytes or a temp movie file),
+    /// skipping any that fail or are too short to play, until `want` are ready.
+    /// Loaded items replace their placeholders in the pool, so each loads once.
+    private func materialize(_ candidates: [DeckItem], want: Int) async -> [DeckItem] {
+        var out: [DeckItem] = []
+        for candidate in candidates where out.count < want {
+            if candidate.isLoaded {
+                out.append(candidate)
                 continue
             }
+            guard let pick = pickerItems[candidate.id], let item = await load(candidate, from: pick) else { continue }
+            pickerItems[candidate.id] = nil
+            state.updatePool(item)
+            if item.isPlayable { out.append(item) }
         }
-        guard !added.isEmpty else {
-            note = "Couldn't read those items. Try different ones."
-            return
-        }
-        state.add(added)
-        notify()
+        return out
     }
 
-    func toggleHidden(_ id: String) {
-        let hide = !state.isHidden(id)
-        state.setHidden(id, hide)
-        if let assetID = state.item(id)?.assetID {
-            if hide { hiddenAssets.insert(assetID) } else { hiddenAssets.remove(assetID) }
-            defaults.set(Array(hiddenAssets), forKey: Self.hiddenDefaultsKey)
+    private func load(_ candidate: DeckItem, from pick: PhotosPickerItem) async -> DeckItem? {
+        var item = candidate
+        do {
+            if candidate.kind == .video {
+                guard let movie = try await pick.loadTransferable(type: PickedMovie.self) else { return nil }
+                item.videoFile = movie.url
+                item.duration = (try? await AVURLAsset(url: movie.url).load(.duration))?.seconds
+            } else {
+                guard let data = try await pick.loadTransferable(type: Data.self) else { return nil }
+                // Keep memory small: store the same compressed form we would upload.
+                let compressed = (try? MediaProcessor.compressPhoto(data)) ?? data
+                guard compressed.count <= MediaConstraints.photoMaxBytes else { return nil }
+                item.photoData = compressed
+            }
+            return item
+        } catch {
+            return nil
         }
+    }
+
+    #if DEBUG
+    /// Screenshot fixtures: fills bunches without PhotoKit.
+    func debugFill(photos: [DeckItem], videos: [DeckItem], swapsLeft: Int? = nil) {
+        state.addToPool(photos + videos)
+        if !photos.isEmpty { state.deal(.photo, items: photos, source: .picked) }
+        if !videos.isEmpty { state.deal(.video, items: videos, source: .picked) }
+        if let swapsLeft { state.photos.swapsLeft = swapsLeft; state.videos.swapsLeft = swapsLeft }
         notify()
     }
+    #endif
 
     // MARK: - Processing
 
-    /// One random unused, unhidden item that fits the mode.
-    func randomCandidate(mode: MediaMode) -> DeckItem? {
-        state.candidates(mode).randomElement()
+    /// One random unused bunch item that fits the mode (and kind, if given).
+    func randomCandidate(mode: MediaMode, kind: MediaKind? = nil) -> DeckItem? {
+        state.candidates(mode, kind: kind).randomElement()
     }
 
     /// Compresses a photo or cuts a clip. Never uploads; the caller holds the bytes.
@@ -282,19 +310,27 @@ struct PreparedItem: Equatable {
 
         var image: UIImage?
         if let data = item.photoData {
-            image = UIImage(data: data)
+            image = UIImage(data: data)?.preparingThumbnail(of: CGSize(width: size.width * 2, height: size.height * 2)) ?? UIImage(data: data)
         } else if let assetID = item.assetID, let asset = MediaLibrary.asset(id: assetID) {
             image = await requestImage(asset, size: size)
+        } else if let file = item.videoFile {
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: file))
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: size.width * 2, height: size.height * 2)
+            if let cg = try? await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image {
+                image = UIImage(cgImage: cg)
+            }
         }
         if let image { thumbnails.setObject(image, forKey: key) }
         return image
     }
 
     func previewImage(for item: DeckItem) async -> UIImage? {
-        await thumbnail(for: item, size: CGSize(width: 900, height: 900))
+        if let data = item.photoData { return UIImage(data: data) }
+        return await thumbnail(for: item, size: CGSize(width: 900, height: 900))
     }
 
-    /// A looping player's item for a local preview (library video or picked file).
+    /// A player item for a local preview (library video or picked file).
     func playerItem(for item: DeckItem) async -> AVPlayerItem? {
         if let file = item.videoFile { return AVPlayerItem(url: file) }
         guard let assetID = item.assetID, let asset = MediaLibrary.asset(id: assetID) else { return nil }

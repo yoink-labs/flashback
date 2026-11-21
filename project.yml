@@ -30,7 +30,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.yoinklabs.flashback
         MARKETING_VERSION: '0.1.0'
-        CURRENT_PROJECT_VERSION: '3'
+        CURRENT_PROJECT_VERSION: '4'
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: Flashback/Resources/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: Flashback
@@ -38,6 +38,7 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: 'UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight'
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: 'UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight'
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: 'Save photos and clips from the game to your library.'
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: 'Flashback picks a few random photos or videos for your game. Only small copies of the ones picked are shared with your room, and they are deleted after each round.'
         TARGETED_DEVICE_FAMILY: '1,2'
         SUPPORTS_MACCATALYST: NO

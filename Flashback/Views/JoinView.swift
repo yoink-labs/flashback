@@ -20,37 +20,30 @@ struct JoinView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            ScrollView {
-                VStack(alignment: .leading, spacing: Spacing.section) {
-                    codeEntry
-                    if let message = codeMessage {
-                        Text(message)
-                            .font(.flCaption)
-                            .foregroundStyle(Palette.bad)
-                            .accessibilityIdentifier("join-error")
-                    }
-                    if complete {
-                        roomPreview
-                            .transition(.opacity)
-                        nameField
-                    }
+        NavigationStack {
+            KeyboardStableLayout { layout, _ in
+                if layout.isWide {
+                    wide
+                } else {
+                    compact
                 }
-                .padding(.horizontal, Spacing.pageCompact)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity)
-                .animation(.easeOut(duration: 0.2), value: room.roomInfo)
             }
-            .scrollDismissesKeyboard(.interactively)
-            if complete {
-                joinBar
+            .background(Palette.bg.ignoresSafeArea())
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        close()
+                    } label: {
+                        Label("Back", systemImage: "chevron.left")
+                    }
+                    .accessibilityIdentifier("join-back")
+                }
             }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Palette.bg, for: .navigationBar)
         }
-        .background(Palette.bg.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .fontDesign(.rounded)
         .task(id: code) {
             room.error = nil
             guard complete else {
@@ -69,28 +62,90 @@ struct JoinView: View {
         }
     }
 
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Button {
-                close()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Palette.text)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+    private var compact: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.section) {
+                    title
+                    codeSection
+                    if complete {
+                        roomPreview
+                            .transition(.opacity)
+                        nameField
+                    }
+                }
+                .padding(.horizontal, Spacing.pageCompact)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
+                .frame(maxWidth: 520)
+                .frame(maxWidth: .infinity)
+                .animation(.easeOut(duration: 0.2), value: room.roomInfo)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
-            Text("Join a game")
-                .font(.flTitle)
-                .foregroundStyle(Palette.text)
-            Spacer(minLength: 0)
+            .scrollDismissesKeyboard(.interactively)
+            if complete {
+                joinBar
+                    .padding(.horizontal, Spacing.pageCompact)
+                    .frame(maxWidth: 520)
+                    .frame(maxWidth: .infinity)
+            }
         }
-        .padding(.horizontal, Spacing.pageCompact - 12)
-        .padding(.top, 4)
+    }
+
+    /// Code entry in the leading pane; the room, your name and Join in the
+    /// trailing pane, so nothing tappable sits on the fold.
+    private var wide: some View {
+        TwoPane { _ in
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.section) {
+                    title
+                    codeSection
+                }
+                .padding(.top, 8)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .padding(.leading, Spacing.pageWide)
+        } trailing: { _ in
+            VStack(alignment: .leading, spacing: 0) {
+                if complete {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: Spacing.section) {
+                            roomPreview
+                            nameField
+                        }
+                        .padding(.top, 8)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    joinBar
+                } else {
+                    Text("Ask the host for the 6-letter code.")
+                        .font(.flBody)
+                        .foregroundStyle(Palette.text3)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .padding(.trailing, Spacing.pageWide)
+            .animation(.easeOut(duration: 0.2), value: room.roomInfo)
+        }
+    }
+
+    private var title: some View {
+        Text("Join a game")
+            .font(.flTitle)
+            .foregroundStyle(Palette.text)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private var codeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            codeEntry
+            if let message = codeMessage {
+                Text(message)
+                    .font(.flCaption)
+                    .foregroundStyle(Palette.bad)
+                    .accessibilityIdentifier("join-error")
+            }
+        }
     }
 
     // MARK: - Code
@@ -107,6 +162,10 @@ struct JoinView: View {
                 .textInputAutocapitalization(.characters)
                 .autocorrectionDisabled()
                 .focused($focused)
+                // Invisible input behind the boxes: clear text and caret too, since
+                // system text effects can draw outside the field's own opacity.
+                .foregroundStyle(.clear)
+                .tint(.clear)
                 .opacity(0.01)
                 .accessibilityIdentifier("room-code")
         }
@@ -155,7 +214,7 @@ struct JoinView: View {
                         .font(.flHeadline)
                         .foregroundStyle(Palette.text)
                         .lineLimit(1)
-                    Text("\(info.players) players · \(info.settings?.mediaMode.label ?? "Mix") · \(info.rounds) rounds")
+                    Text("\(info.players) \(info.players == 1 ? "player" : "players") · \(info.settings?.mediaMode.label ?? "Mix") · \(RoomSettings.roundsLabel(info.rounds))")
                         .font(.flCaption)
                         .foregroundStyle(Palette.text2)
                         .lineLimit(1)
@@ -206,9 +265,6 @@ struct JoinView: View {
         }
         .buttonStyle(.primary)
         .disabled(!canJoin)
-        .frame(maxWidth: 520)
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, Spacing.pageCompact)
         .padding(.top, 10)
         .padding(.bottom, 8)
         .background(Palette.bg)

@@ -1,36 +1,29 @@
-// The player's local deck and the prepared-next item.
+// The player's deck as a React hook: the current DeckModel (deckModel.ts holds
+// every rule about what is in a bunch) plus the async work around it.
 //
-// The deck is a list of files that never leave the device. Only one item per
-// round is compressed and uploaded, and only when the server privately asks for
-// it (`turn`). From the moment the player readies up we keep one item already
+// Nothing leaves the device until the server privately asks for one item
+// (`turn`, which names the kind). Only bunch items are candidates. From the
+// moment the player readies up we keep one item of each needed kind already
 // processed so that upload starts instantly. All of this is silent: nothing in
 // the UI may hint that it is this player's turn.
+//
+// The bunches (not the whole pool) survive a tab reload via deckStore.ts.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { uploadMedia, type RoomSession } from './api';
-import { isVideoFile, preparePhoto, prepareVideo } from './media';
-import type { ClientMessage, DeckCounts, MediaKind, MediaMode, Phase, TurnMessage } from './types';
+import { APIError, uploadMedia, type RoomSession } from './api';
+import * as model from './deckModel';
+import { useStoredDeck } from './deckStore';
+import { canConvertVideos, mediaKindOf, preparePhoto, prepareVideo } from './media';
+import { loadThumb } from './thumbs';
+import type { ClientMessage, MediaKind, MediaMode, Phase, TurnMessage } from './types';
+import { toast } from './ui/Toast';
 
-export interface DeckItem {
-  id: string;
-  file: File;
-  kind: MediaKind;
-  hidden: boolean;
-  /** Already shown (or on its way) this session. Never picked again until recycled. */
-  used: boolean;
-}
-
-export const MAX_DECK = 200;
-export const TRIM_TO = 24;
-
-export const fitsMode = (kind: MediaKind, mode: MediaMode) =>
-  mode === 'both' || (mode === 'photos' ? kind === 'photo' : kind === 'video');
+export { kindsFor, type BunchView, type DeckItem, type SwapResult } from './deckModel';
 
 let sequence = 0;
 const newID = () => `d${Date.now().toString(36)}${(sequence++).toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 
 interface Prepared {
   itemID: string;
-  kind: MediaKind;
   blob: Blob;
 }
 
@@ -39,207 +32,239 @@ interface Args {
   /** Always call with the newest session token. */
   session: () => RoomSession;
   mode: MediaMode;
+  /** `settings.swaps`: swaps per bunch. */
+  swaps: number;
   phase: Phase;
   ready: boolean;
   connected: boolean;
-  game: number;
+  /** IndexedDB key for this room + player (`deckKey`); null keeps the deck in memory only. */
+  storeKey: string | null;
   /** Receives the owner's own copy so it can be shown without a round trip. */
   onUploaded: (game: number, round: number, blob: Blob, kind: MediaKind) => void;
 }
 
+const inGame = (phase: Phase) => phase === 'countdown' || phase === 'reveal' || phase === 'results';
+
 export function useDeck(args: Args) {
-  const [items, setItems] = useState<DeckItem[]>([]);
-  const [durations, setDurations] = useState<Record<string, number>>({});
-  const itemsRef = useRef<DeckItem[]>(items);
-  const preparedRef = useRef<Prepared | null>(null);
-  /** The preparation currently running, so a turn can wait for it instead of passing. */
-  const preparingRef = useRef<Promise<void> | null>(null);
-  const failedRef = useRef<Set<string>>(new Set());
+  const modelRef = useRef<model.DeckModel>(model.EMPTY_DECK);
+  const [state, setState] = useState<model.DeckModel>(model.EMPTY_DECK);
+  const preparedRef = useRef<Record<MediaKind, Prepared | null>>({ photo: null, video: null });
+  /** Preparations running, so a turn can wait for one instead of passing. */
+  const preparingRef = useRef<Record<MediaKind, Promise<void> | null>>({ photo: null, video: null });
   const lastDeck = useRef('');
   const queue = useRef<Promise<void>>(Promise.resolve());
   const ctx = useRef(args);
   ctx.current = args;
+  const [loaded, setLoaded] = useState(false);
 
-  const update = useCallback((change: (previous: DeckItem[]) => DeckItem[]) => {
-    itemsRef.current = change(itemsRef.current);
-    setItems(itemsRef.current);
+  const [canSendVideos, setCanSendVideos] = useState(() => typeof VideoEncoder !== 'undefined');
+  const videosOK = useRef(canSendVideos);
+  videosOK.current = canSendVideos;
+
+  /**
+   * The one way the model changes. The ref updates synchronously, so
+   * back-to-back taps (and async work) always build on the latest model.
+   */
+  const commit = useCallback((next: model.DeckModel) => {
+    if (next === modelRef.current) return;
+    modelRef.current = next;
+    setState(next);
   }, []);
 
-  const setDuration = useCallback((id: string, seconds: number) => {
-    if (!Number.isFinite(seconds) || seconds <= 0) return;
-    setDurations((previous) => (previous[id] === seconds ? previous : { ...previous, [id]: seconds }));
+  const stored = useStoredDeck({
+    key: args.storeKey,
+    snapshot: () => model.snapshot(modelRef.current),
+    restore: (deck) => {
+      // Files picked while the restore was loading win.
+      if (!modelRef.current.pool.length) commit(model.restore(deck));
+    },
+  });
+  const { schedule: scheduleSave, loaded: storeLoaded } = stored;
+  useEffect(() => {
+    let live = true;
+    void storeLoaded.then(() => live && setLoaded(true));
+    return () => {
+      live = false;
+    };
+  }, [storeLoaded]);
+  // Save after every change, once the restore attempt can no longer be overwritten.
+  useEffect(() => {
+    if (loaded) scheduleSave();
+  }, [loaded, state, scheduleSave]);
+
+  useEffect(() => {
+    let live = true;
+    void canConvertVideos().then((ok) => live && setCanSendVideos(ok));
+    return () => {
+      live = false;
+    };
   }, []);
 
-  /** An item still eligible to be prepared and uploaded. */
-  const usable = useCallback((id: string, mode: MediaMode) => {
-    const item = itemsRef.current.find((candidate) => candidate.id === id);
-    return Boolean(item && !item.hidden && !item.used && fitsMode(item.kind, mode));
-  }, []);
+  /** Never offer this item again; its tile is refilled for free when the pool allows. */
+  const fail = useCallback(
+    (id: string) => {
+      if (modelRef.current.failed.has(id)) return;
+      if (preparedRef.current.photo?.itemID === id) preparedRef.current.photo = null;
+      if (preparedRef.current.video?.itemID === id) preparedRef.current.video = null;
+      commit(model.markFailed(modelRef.current, id));
+    },
+    [commit],
+  );
 
   const addFiles = useCallback(
     (files: File[]) => {
-      const media = files.filter((file) => file.type.startsWith('image/') || isVideoFile(file));
-      const room = Math.max(0, MAX_DECK - itemsRef.current.length);
-      const accepted = media.slice(0, room);
-      if (accepted.length) {
-        const added: DeckItem[] = accepted.map((file) => ({
-          id: newID(),
-          file,
-          kind: isVideoFile(file) ? 'video' : 'photo',
-          hidden: false,
-          used: false,
-        }));
-        update((previous) => [...previous, ...added]);
-      }
-      return { added: accepted.length, skipped: media.length - accepted.length, ignored: files.length - media.length };
+      const [next, summary] = model.addFiles(modelRef.current, files, mediaKindOf, newID);
+      commit(next);
+      return summary;
     },
-    [update],
+    [commit],
   );
 
-  const setHidden = useCallback(
-    (id: string, hidden: boolean) => update((previous) => previous.map((item) => (item.id === id ? { ...item, hidden } : item))),
-    [update],
+  const swap = useCallback(
+    (kind: MediaKind, slot: number) => {
+      const [next, result] = model.swap(modelRef.current, kind, slot, ctx.current.swaps);
+      commit(next);
+      return result;
+    },
+    [commit],
   );
 
-  const removeItem = useCallback(
-    (id: string) => update((previous) => previous.filter((item) => item.id !== id)),
-    [update],
-  );
+  const newBunch = useCallback((kind: MediaKind) => commit(model.newBunch(modelRef.current, kind)), [commit]);
 
-  /** Keeps a random 24 of the current items and drops the rest from the deck. */
-  const pickRandom = useCallback(() => {
-    const all = itemsRef.current;
-    if (all.length <= TRIM_TO) return 0;
-    const shuffled = [...all];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  // Thumbnails double as a cheap readability check: a bunch item this browser
+  // can't open at all (HEIC in Chrome, a codec it lacks) is replaced right away
+  // instead of failing at turn time. Only the kinds the mode plays are checked.
+  const bunchIDs = model.kindsFor(args.mode).flatMap((kind) => state[kind].ids).join(',');
+  useEffect(() => {
+    let live = true;
+    const current = modelRef.current;
+    for (const item of model.kindsFor(ctx.current.mode).flatMap((kind) => model.bunchItems(current, kind))) {
+      void loadThumb(item.id, item.file, item.kind).then((thumb) => {
+        if (!live || !thumb.failed) return;
+        // Silent in a game: a toast then could hint that it is this player's turn.
+        if (ctx.current.phase === 'lobby') toast(`Can’t open “${item.file.name}” in this browser`);
+        fail(item.id);
+      });
     }
-    const keep = new Set(shuffled.slice(0, TRIM_TO).map((item) => item.id));
-    update((previous) => previous.filter((item) => keep.has(item.id)));
-    return all.length - TRIM_TO;
-  }, [update]);
+    return () => {
+      live = false;
+    };
+  }, [bunchIDs, fail]);
 
-  /**
-   * One unused, unhidden item that fits the mode; when every item has been
-   * shown, the used marks are cleared so the deck recycles.
-   */
-  const pickCandidate = useCallback(
-    (mode: MediaMode): DeckItem | null => {
-      const pool = itemsRef.current.filter((item) => !item.hidden && !item.used && fitsMode(item.kind, mode) && !failedRef.current.has(item.id));
-      if (pool.length) return pool[Math.floor(Math.random() * pool.length)];
-      const recyclable = itemsRef.current.filter((item) => item.used && !item.hidden && fitsMode(item.kind, mode) && !failedRef.current.has(item.id));
-      if (!recyclable.length) return null;
-      update((previous) => previous.map((item) => (item.used && !item.hidden && fitsMode(item.kind, mode) ? { ...item, used: false } : item)));
-      return recyclable[Math.floor(Math.random() * recyclable.length)];
-    },
-    [update],
-  );
-
-  /** Processes one item in the background and keeps it ready to upload. */
+  /** Processes one item of `kind` in the background and keeps it ready to upload. */
   const prepareNext = useCallback(
-    (mode: MediaMode) => {
-      if (preparingRef.current) return preparingRef.current;
+    (kind: MediaKind) => {
+      const running = preparingRef.current[kind];
+      if (running) return running;
+      // Without WebCodecs every clip would fail: don't mark them all unreadable.
+      if (kind === 'video' && !videosOK.current) return Promise.resolve();
       const run = (async () => {
-        for (let attempt = 0; attempt < Math.min(30, itemsRef.current.length + 1); attempt++) {
-          const prepared = preparedRef.current;
-          if (prepared && usable(prepared.itemID, mode)) return;
-          preparedRef.current = null;
-          const item = pickCandidate(mode);
-          if (!item) return;
+        for (let attempt = 0; attempt < model.BUNCH_SIZE[kind] + 2; attempt++) {
+          const prepared = preparedRef.current[kind];
+          if (prepared && model.isUsable(modelRef.current, prepared.itemID, kind)) return;
+          preparedRef.current[kind] = null;
+          const [next, candidate] = model.pickCandidate(modelRef.current, kind);
+          commit(next);
+          if (!candidate) return;
           try {
-            const blob = item.kind === 'photo' ? await preparePhoto(item.file) : await prepareVideo(item.file);
-            if (usable(item.id, mode)) {
-              preparedRef.current = { itemID: item.id, kind: item.kind, blob };
+            const blob = kind === 'photo' ? await preparePhoto(candidate.file) : await prepareVideo(candidate.file);
+            if (model.isUsable(modelRef.current, candidate.id, kind)) {
+              preparedRef.current[kind] = { itemID: candidate.id, blob };
               return;
             }
           } catch {
             // Try the next item; one unreadable file must not stall the round.
-            failedRef.current.add(item.id);
+            fail(candidate.id);
           }
         }
       })();
-      preparingRef.current = run;
+      preparingRef.current[kind] = run;
       void run.finally(() => {
-        if (preparingRef.current === run) preparingRef.current = null;
+        if (preparingRef.current[kind] === run) preparingRef.current[kind] = null;
       });
       return run;
     },
-    [pickCandidate, usable],
+    [commit, fail],
   );
+
+  /** The kind to upload for a turn: the one the server names, else a random one the mode allows. */
+  const kindForTurn = useCallback((turn: TurnMessage): MediaKind | null => {
+    if (turn.kind === 'photo' || turn.kind === 'video') return turn.kind;
+    const kinds = model.kindsFor(turn.mode ?? ctx.current.mode);
+    const ready = kinds.filter((kind) => preparedRef.current[kind]);
+    const options = ready.length ? ready : kinds.filter((kind) => modelRef.current[kind].ids.length);
+    return options.length ? options[Math.floor(Math.random() * options.length)] : null;
+  }, []);
 
   const handleTurn = useCallback(
     async (turn: TurnMessage) => {
-      const mode = turn.mode ?? ctx.current.mode;
-      let prepared = preparedRef.current;
-      if (prepared && !usable(prepared.itemID, mode)) preparedRef.current = null;
-      prepared = preparedRef.current;
-      // Wait for any preparation already running (it may be for a different
-      // mode, in which case the loop asks again for this one).
+      const pass = () => ctx.current.send({ type: 'pass', slot: turn.slot });
+      const kind = kindForTurn(turn);
+      if (!kind) return pass();
+      const current = () => {
+        const prepared = preparedRef.current[kind];
+        if (prepared && !model.isUsable(modelRef.current, prepared.itemID, kind)) preparedRef.current[kind] = null;
+        return preparedRef.current[kind];
+      };
+      let prepared = current();
+      // Wait for a preparation already running, or start one.
       for (let attempt = 0; !prepared && attempt < 2; attempt++) {
-        await prepareNext(mode);
-        prepared = preparedRef.current;
-        if (prepared && !usable(prepared.itemID, mode)) preparedRef.current = null;
-        prepared = preparedRef.current;
+        await prepareNext(kind);
+        prepared = current();
       }
-      if (!prepared) {
-        ctx.current.send({ type: 'pass', slot: turn.slot });
-        return;
-      }
-      const contentType = prepared.kind === 'photo' ? 'image/jpeg' : 'video/mp4';
+      if (!prepared) return pass();
       try {
-        await uploadMedia(ctx.current.session(), turn.slot, prepared.blob, contentType);
-        const uploaded = prepared;
-        preparedRef.current = null;
-        update((previous) => previous.map((item) => (item.id === uploaded.itemID ? { ...item, used: true } : item)));
-        ctx.current.onUploaded(turn.game, turn.round, uploaded.blob, uploaded.kind);
-        void prepareNext(mode);
+        await uploadMedia(ctx.current.session(), turn.slot, prepared.blob, kind === 'photo' ? 'image/jpeg' : 'video/mp4');
+        preparedRef.current[kind] = null;
+        commit(model.setUsed(modelRef.current, new Set([prepared.itemID]), true));
+        ctx.current.onUploaded(turn.game, turn.round, prepared.blob, kind);
+        void prepareNext(kind);
       } catch (error) {
-        const status = (error as { status?: number }).status ?? 0;
+        const status = error instanceof APIError ? error.status : 0;
         // 409/404: the turn already moved on (timeout or reassign). Keep the
         // prepared item for next time and say nothing.
         if (status === 409 || status === 404) return;
-        if (status !== 0) {
-          // The server rejected this file: never offer it again.
-          const rejected = prepared;
-          preparedRef.current = null;
-          update((previous) => previous.map((item) => (item.id === rejected.itemID ? { ...item, used: true } : item)));
-        }
-        ctx.current.send({ type: 'pass', slot: turn.slot });
-        void prepareNext(mode);
+        // Any other answer from the server rejected this file: never offer it again.
+        if (status !== 0) fail(prepared.itemID);
+        pass();
+        void prepareNext(kind);
       }
     },
-    [prepareNext, update, usable],
+    [commit, fail, kindForTurn, prepareNext],
   );
 
   /** Turns are handled one at a time so two lookahead slots cannot race. */
   const enqueueTurn = useCallback(
     (turn: TurnMessage) => {
-      queue.current = queue.current.then(() => handleTurn(turn)).catch(() => {});
+      // After a reload, wait for the stored bunch before answering a turn.
+      queue.current = queue.current
+        .then(() => storeLoaded)
+        .then(() => handleTurn(turn))
+        .catch(() => {});
     },
-    [handleTurn],
+    [handleTurn, storeLoaded],
   );
 
-  // Keep one item processed from ready-up onward (and through the game).
+  // Keep one item of each needed kind processed from ready-up onward (and
+  // through the game). Photos first: they are quick; videos are re-encoded.
+  const active = inGame(args.phase) || (args.phase === 'lobby' && args.ready);
   useEffect(() => {
-    const active = args.phase === 'countdown' || args.phase === 'reveal' || args.phase === 'results' || (args.phase === 'lobby' && args.ready);
     if (!active) return;
-    const prepared = preparedRef.current;
-    if (prepared && usable(prepared.itemID, args.mode)) return;
-    preparedRef.current = null;
-    void prepareNext(args.mode);
-  }, [args.mode, args.phase, args.ready, items, prepareNext, usable]);
+    let cancelled = false;
+    void (async () => {
+      for (const kind of model.kindsFor(args.mode)) {
+        if (cancelled) return;
+        await prepareNext(kind);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [active, args.mode, canSendVideos, state, prepareNext]);
 
-  const counts = useMemo<DeckCounts>(() => {
-    let photos = 0;
-    let videos = 0;
-    for (const item of items) {
-      if (item.hidden || item.used || !fitsMode(item.kind, args.mode)) continue;
-      if (item.kind === 'photo') photos += 1;
-      else videos += 1;
-    }
-    return { photos, videos };
-  }, [items, args.mode]);
+  const photo = useMemo(() => model.bunchView(state, 'photo', args.swaps), [state, args.swaps]);
+  const video = useMemo(() => model.bunchView(state, 'video', args.swaps), [state, args.swaps]);
+  const counts = useMemo(() => model.deckCounts(state, args.mode, canSendVideos), [state, args.mode, canSendVideos]);
 
   // Tell the server the deck size whenever it changes (or after a reconnect).
   const { connected, send } = args;
@@ -248,23 +273,28 @@ export function useDeck(args: Args) {
       lastDeck.current = '';
       return;
     }
+    // Don't report an empty deck (and lose Ready) while the stored bunch loads.
+    if (!loaded) return;
     const payload = `${counts.photos}:${counts.videos}`;
     if (lastDeck.current === payload) return;
     lastDeck.current = payload;
     send({ type: 'deck', photos: counts.photos, videos: counts.videos });
-  }, [connected, send, counts]);
+  }, [connected, send, counts, loaded]);
 
   return {
-    items,
-    durations,
+    photo,
+    video,
     counts,
-    available: counts.photos + counts.videos,
+    /** The bunches meet the mode's need, exactly as the server checks it. */
+    fits: model.deckFits(counts, args.mode),
+    /** False when this browser can't convert clips (no WebCodecs H.264). */
+    canSendVideos,
     addFiles,
-    setHidden,
-    removeItem,
-    pickRandom,
-    setDuration,
+    swap,
+    newBunch,
     handleTurn: enqueueTurn,
+    /** Deletes the stored bunch (leaving, room closed, removed). */
+    forget: stored.forget,
   };
 }
 

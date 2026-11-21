@@ -50,13 +50,29 @@ struct DeckCount: Codable, Equatable {
 
     var total: Int { photos + videos }
 
-    /// Whether at least one item fits the room's media mode.
-    func fits(_ mode: MediaMode) -> Bool {
+    /// Equal bunches (docs/MILESTONE3.md section 7): everyone brings 12 photos
+    /// and/or 6 videos.
+    static let photoBunch = 12
+    static let videoBunch = 6
+
+    /// What a player needs to bring in this mode.
+    static func required(_ mode: MediaMode) -> DeckCount {
         switch mode {
-        case .photos: photos > 0
-        case .videos: videos > 0
-        case .both: photos + videos > 0
+        case .photos: DeckCount(photos: photoBunch)
+        case .videos: DeckCount(videos: videoBunch)
+        case .both: DeckCount(photos: photoBunch, videos: videoBunch)
         }
+    }
+
+    /// Whether the bunch is complete for the room's media mode (server `deckFits`).
+    func fits(_ mode: MediaMode) -> Bool {
+        missing(mode).total == 0
+    }
+
+    /// How many more of each kind are needed in this mode.
+    func missing(_ mode: MediaMode) -> DeckCount {
+        let need = Self.required(mode)
+        return DeckCount(photos: max(0, need.photos - photos), videos: max(0, need.videos - videos))
     }
 
     private enum CodingKeys: String, CodingKey { case photos, videos }
@@ -72,8 +88,46 @@ struct RoomSettings: Codable, Equatable {
     var rounds: Int
     var timerSeconds: Int
     var mediaMode: MediaMode
+    /// Length of the results screen ("Between rounds"), 3–30 s.
+    var breakSeconds: Int
+    /// Swaps each player gets per bunch, 0–10.
+    var swaps: Int
 
-    static let defaults = RoomSettings(rounds: 10, timerSeconds: 20, mediaMode: .both)
+    init(rounds: Int = 10, timerSeconds: Int = 20, mediaMode: MediaMode = .both, breakSeconds: Int = 7, swaps: Int = 3) {
+        self.rounds = rounds
+        self.timerSeconds = timerSeconds
+        self.mediaMode = mediaMode
+        self.breakSeconds = breakSeconds
+        self.swaps = swaps
+    }
+
+    static let defaults = RoomSettings()
+
+    /// Settings sheet ranges and quick picks (docs/MILESTONE3.md section 2).
+    static let roundsRange = 1...30
+    static let roundChips = [5, 10, 15, 20]
+    static let timerChips = [10, 15, 20, 30, 45, 60]
+    static let breakChips = [3, 5, 7, 10, 15]
+    static let swapChips = [0, 1, 3, 5]
+
+    /// The lobby settings row: `Mix · 10 rounds · 20s`.
+    var summary: String { "\(mediaMode.label) · \(Self.roundsLabel(rounds)) · \(timerSeconds)s" }
+
+    /// "1 round" / "3 rounds".
+    static func roundsLabel(_ rounds: Int) -> String { rounds == 1 ? "1 round" : "\(rounds) rounds" }
+
+    private enum CodingKeys: String, CodingKey { case rounds, timerSeconds, mediaMode, breakSeconds, swaps }
+
+    /// Older servers send no `breakSeconds` / `swaps`: those decode as the defaults.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = RoomSettings()
+        rounds = try c.decodeIfPresent(Int.self, forKey: .rounds) ?? d.rounds
+        timerSeconds = try c.decodeIfPresent(Int.self, forKey: .timerSeconds) ?? d.timerSeconds
+        mediaMode = try c.decodeIfPresent(MediaMode.self, forKey: .mediaMode) ?? d.mediaMode
+        breakSeconds = try c.decodeIfPresent(Int.self, forKey: .breakSeconds) ?? d.breakSeconds
+        swaps = try c.decodeIfPresent(Int.self, forKey: .swaps) ?? d.swaps
+    }
 }
 
 struct PlayerView: Codable, Equatable, Identifiable {
@@ -219,9 +273,36 @@ struct RoomView: Codable, Equatable {
     var round: RoundView?
     var lastResult: RoundResult?
     var podium: [PodiumEntry]
+    /// The host paused the game: timers are frozen and guessing is closed.
+    var paused: Bool = false
+    /// Time that was left in the phase when it was paused (nil: no deadline).
+    var pausedRemainingMs: Double?
 
     var me: PlayerView? { players.first { $0.id == you.id } }
+
+    /// Milliseconds left until `end`, frozen at `pausedRemainingMs` while paused.
+    func remainingMs(until end: Double?, now: Double) -> Double {
+        if paused { return max(0, pausedRemainingMs ?? 0) }
+        return max(0, (end ?? now) - now)
+    }
+
+    /// Countdown, reveal and results: the phases a host can pause.
+    var isInRound: Bool { [.countdown, .reveal, .results].contains(phase) }
+    /// The host may pause during countdown, reveal, and results.
+    var canPause: Bool { isInRound && !paused }
+    /// The pause overlay is up (a pause only exists inside a round).
+    var showsPause: Bool { isInRound && paused }
+    /// The phase has a deadline; while paused, whether it had one when paused.
+    /// None in countdown means the upload is still on its way ("Shuffling…").
+    var hasDeadline: Bool { paused ? pausedRemainingMs != nil : phaseEndsAt != nil }
+    /// Guess buttons are live: the server allows it and the game is not paused.
+    var canGuess: Bool { round?.canGuess == true && !paused }
     var isHost: Bool { hostID == you.id }
+    /// Results of the last round: the next screen is the podium, not a round.
+    var isFinalResult: Bool {
+        guard let index = lastResult?.index else { return false }
+        return index >= (round?.total ?? settings.rounds)
+    }
 
     func name(_ id: String?) -> String {
         players.first { $0.id == id }?.nickname ?? "Someone who left"
@@ -234,6 +315,34 @@ struct RoomView: Codable, Equatable {
     /// Join order index, used for the 12-colour player palette.
     func colorIndex(_ id: String?) -> Int {
         players.firstIndex { $0.id == id } ?? 0
+    }
+}
+
+extension RoomView {
+    private enum CodingKeys: String, CodingKey {
+        case code, phase, game, hostID, capacity, settings, serverNow, phaseEndsAt, startBlocker
+        case players, you, round, lastResult, podium, paused, pausedRemainingMs
+    }
+
+    /// `paused` / `pausedRemainingMs` are new in Milestone 3; older servers omit them.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        code = try c.decode(String.self, forKey: .code)
+        phase = try c.decode(Phase.self, forKey: .phase)
+        game = try c.decodeIfPresent(Int.self, forKey: .game) ?? 0
+        hostID = try c.decodeIfPresent(String.self, forKey: .hostID)
+        capacity = try c.decodeIfPresent(Int.self, forKey: .capacity) ?? 12
+        settings = try c.decodeIfPresent(RoomSettings.self, forKey: .settings) ?? .defaults
+        serverNow = try c.decode(Double.self, forKey: .serverNow)
+        phaseEndsAt = try c.decodeIfPresent(Double.self, forKey: .phaseEndsAt)
+        startBlocker = try c.decodeIfPresent(String.self, forKey: .startBlocker)
+        players = try c.decodeIfPresent([PlayerView].self, forKey: .players) ?? []
+        you = try c.decode(YouView.self, forKey: .you)
+        round = try c.decodeIfPresent(RoundView.self, forKey: .round)
+        lastResult = try c.decodeIfPresent(RoundResult.self, forKey: .lastResult)
+        podium = try c.decodeIfPresent([PodiumEntry].self, forKey: .podium) ?? []
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        pausedRemainingMs = try c.decodeIfPresent(Double.self, forKey: .pausedRemainingMs)
     }
 }
 
@@ -302,15 +411,15 @@ struct MediaBlob: Equatable {
 /// Messages the client sends. `auth.<token>` is a WebSocket subprotocol, not a message.
 enum ClientMessage: Encodable {
     case ready(Bool)
-    case settings(rounds: Int? = nil, timerSeconds: Int? = nil, mediaMode: MediaMode? = nil)
-    case start, advance, end, playAgain, leave, ping
+    case settings(rounds: Int? = nil, timerSeconds: Int? = nil, mediaMode: MediaMode? = nil, breakSeconds: Int? = nil, swaps: Int? = nil)
+    case start, advance, end, playAgain, leave, ping, pause, resume
     case guess(String)
     case deck(DeckCount)
     case pass(String)
     case needMedia(Int)
 
     private enum Key: String, CodingKey {
-        case type, ready, rounds, timerSeconds, mediaMode, targetID, photos, videos, slot, round
+        case type, ready, rounds, timerSeconds, mediaMode, breakSeconds, swaps, targetID, photos, videos, slot, round
     }
 
     var isPing: Bool {
@@ -324,17 +433,21 @@ enum ClientMessage: Encodable {
         case .ready(let ready):
             try c.encode("ready", forKey: .type)
             try c.encode(ready, forKey: .ready)
-        case .settings(let rounds, let timer, let mode):
+        case .settings(let rounds, let timer, let mode, let breakSeconds, let swaps):
             try c.encode("settings", forKey: .type)
             try c.encodeIfPresent(rounds, forKey: .rounds)
             try c.encodeIfPresent(timer, forKey: .timerSeconds)
             try c.encodeIfPresent(mode, forKey: .mediaMode)
+            try c.encodeIfPresent(breakSeconds, forKey: .breakSeconds)
+            try c.encodeIfPresent(swaps, forKey: .swaps)
         case .start: try c.encode("start", forKey: .type)
         case .advance: try c.encode("advance", forKey: .type)
         case .end: try c.encode("end", forKey: .type)
         case .playAgain: try c.encode("playAgain", forKey: .type)
         case .leave: try c.encode("leave", forKey: .type)
         case .ping: try c.encode("ping", forKey: .type)
+        case .pause: try c.encode("pause", forKey: .type)
+        case .resume: try c.encode("resume", forKey: .type)
         case .guess(let target):
             try c.encode("guess", forKey: .type)
             try c.encode(target, forKey: .targetID)
@@ -364,6 +477,8 @@ struct ServerMessage: Decodable {
     var game: Int?
     var round: Int?
     var mode: MediaMode?
+    /// For `turn`: the kind the owner must upload (Milestone 3; may be missing).
+    var kind: MediaKind?
     /// For `error`: which client message failed.
     var request: String? = nil
 
@@ -377,9 +492,11 @@ struct ServerMessage: Decodable {
         slot: String? = nil,
         game: Int? = nil,
         round: Int? = nil,
-        mode: MediaMode? = nil
+        mode: MediaMode? = nil,
+        kind: MediaKind? = nil
     ) {
         self.type = type
+        self.kind = kind
         self.state = state
         self.message = message
         self.reason = reason

@@ -5,10 +5,13 @@ import { JoinScreen } from './screens/Join';
 import { RoomScreen } from './screens/Room';
 import { SignInScreen } from './screens/SignIn';
 import { loadClerk } from './clerk';
+import { sweepStoredDecks } from './deckStore';
 import './style.css';
 
 // Start loading Clerk in the background. Guests never wait on it.
 void loadClerk();
+// Drop bunches saved for rooms more than six hours ago.
+void sweepStoredDecks();
 
 function App() {
   return (

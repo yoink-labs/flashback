@@ -1,0 +1,369 @@
+/* Flashback — flat dark theme, one accent, no gradients.
+   Tokens, type and spacing follow docs/DESIGN.md. */
+
+:root {
+  --bg: #0e0d12;
+  --surface: #1a1820;
+  --surface-2: #24212c;
+  --line: #2c2935;
+  --text: #f5f4f7;
+  --text-2: #9c98a8;
+  --text-3: #6b6777;
+  --accent: #ff4f64;
+  --good: #3ddc97;
+  --bad: #ff6b6b;
+  --gold: #ffc94a;
+  --radius: 14px;
+  --radius-media: 18px;
+  --pad: 20px;
+  --font: ui-rounded, 'SF Pro Rounded', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme: dark;
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.45;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-text-size-adjust: 100%;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--bg);
+  overflow-x: clip;
+}
+
+a,
+button,
+input {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol {
+  margin: 0;
+}
+
+ul,
+ol {
+  padding: 0;
+  list-style: none;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+img,
+video {
+  max-width: 100%;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- type roles ---- */
+
+.title {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+.headline {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.caption {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+.good {
+  color: var(--good);
+}
+
+.bad {
+  color: var(--bad);
+}
+
+.center-text {
+  text-align: center;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.field-error {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bad);
+}
+
+/* ---- buttons ---- */
+
+.btn {
+  height: 56px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 24px;
+  font-size: 17px;
+  font-weight: 700;
+  background: var(--surface);
+  color: var(--text);
+  transition: background 0.2s ease, transform 0.12s ease, opacity 0.2s ease;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.btn:disabled {
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn.primary:disabled {
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+
+.btn.secondary {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.btn.secondary:disabled {
+  color: var(--text-3);
+}
+
+.btn.text {
+  height: auto;
+  background: none;
+  color: var(--text-2);
+  font-weight: 600;
+  padding: 12px;
+}
+
+.btn.compact {
+  height: 40px;
+  padding: 0 18px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.action-btn {
+  width: 100%;
+  max-width: 360px;
+}
+
+@media (hover: hover) {
+  .btn.primary:hover:not(:disabled) {
+    background: #ff6275;
+  }
+  .btn.secondary:hover:not(:disabled) {
+    background: var(--surface-2);
+  }
+  .btn.text:hover {
+    color: var(--text);
+  }
+}
+
+.icon-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  color: var(--text-2);
+}
+
+@media (hover: hover) {
+  .icon-btn:hover {
+    background: var(--surface);
+    color: var(--text);
+  }
+}
+
+/* ---- shells ---- */
+
+.screen {
+  width: 100%;
+  min-height: 100dvh;
+  padding: calc(20px + env(safe-area-inset-top)) var(--pad) calc(24px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 900px) {
+  .screen {
+    padding-left: 32px;
+    padding-right: 32px;
+  }
+}
+
+.center-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 360px;
+  text-align: center;
+}
+
+.spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid var(--surface-2);
+  border-top-color: var(--text-2);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.screen-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 24px;
+}
+
+.screen-head .icon-btn {
+  margin-left: -10px;
+}
+
+/* Narrow phones: the header title stays on one line next to the back button and the tip pill. */
+.screen-head .title {
+  font-size: clamp(22px, 7vw, 28px);
+  white-space: nowrap;
+}
+
+/* ---- avatars ---- */
+
+.avatar {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--bg);
+  font-weight: 800;
+  line-height: 1;
+  flex: none;
+  user-select: none;
+}
+
+.avatar-xs {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+
+.avatar-sm {
+  width: 28px;
+  height: 28px;
+  font-size: 12px;
+}
+
+.avatar-md {
+  width: 40px;
+  height: 40px;
+  font-size: 16px;
+}
+
+.avatar-lg {
+  width: 56px;
+  height: 56px;
+  font-size: 22px;
+}
+
+.avatar-xl {
+  width: 88px;
+  height: 88px;
+  font-size: 34px;
+}
+
+.avatar-ready {
+  box-shadow: 0 0 0 3px var(--good);
+}
+
+.avatar-gold {
+  box-shadow: 0 0 0 3px var(--gold);
+}
+
+.avatar-dimmed {
+  opacity: 0.35;
+}
+
+.avatar-offline {
+  opacity: 0.4;
+}

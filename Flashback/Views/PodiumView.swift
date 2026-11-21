@@ -20,6 +20,76 @@ struct PodiumView: View {
 
     var body: some View {
         ZStack {
+            if layout.isWide {
+                wide
+            } else {
+                compact
+            }
+            if !reduceMotion {
+                ConfettiView()
+            }
+        }
+        .confirmationDialog("Leave this room?", isPresented: $confirmLeave, titleVisibility: .visible) {
+            Button("Leave", role: .destructive) { Task { await room.leave() } }
+            Button("Stay", role: .cancel) {}
+        }
+    }
+
+    /// Winner and podium in the leading pane; the full ranking and the actions
+    /// in the trailing pane.
+    private var wide: some View {
+        TwoPane { _ in
+            VStack(spacing: 28) {
+                title
+                podium
+            }
+            .padding(.leading, layout.pagePadding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } trailing: { _ in
+            VStack(spacing: 0) {
+                ScrollView {
+                    finalList
+                        .padding(.vertical, 20)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                bottomBar
+            }
+            .padding(.trailing, layout.pagePadding)
+        }
+    }
+
+    private var finalList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Final scores")
+                .font(.flCaption)
+                .foregroundStyle(Palette.text2)
+            ForEach(entries) { entry in
+                HStack(spacing: 10) {
+                    Text("\(entry.rank)")
+                        .font(.fl(15, .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(entry.rank == 1 ? Palette.gold : Palette.text3)
+                        .frame(width: 20, alignment: .leading)
+                    PlayerAvatar(view: view, playerID: entry.playerID, size: 28)
+                    Text(entry.playerID == view.you.id ? "You" : view.name(entry.playerID))
+                        .font(.fl(17, .semibold))
+                        .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(entry.score.formatted())
+                        .font(.fl(17, .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Palette.text)
+                }
+                .frame(minHeight: 48)
+                .padding(.horizontal, 14)
+                .background(entry.playerID == view.you.id ? Palette.surface2 : Palette.surface, in: RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
+            }
+        }
+    }
+
+    private var compact: some View {
+        ZStack {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(spacing: 28) {
@@ -34,14 +104,8 @@ struct PodiumView: View {
                     .frame(maxWidth: .infinity)
                 }
                 bottomBar
+                    .padding(.horizontal, layout.pagePadding)
             }
-            if !reduceMotion {
-                ConfettiView()
-            }
-        }
-        .confirmationDialog("Leave this room?", isPresented: $confirmLeave, titleVisibility: .visible) {
-            Button("Leave", role: .destructive) { Task { await room.leave() } }
-            Button("Stay", role: .cancel) {}
         }
     }
 
@@ -118,14 +182,14 @@ struct PodiumView: View {
                     Text("Play again")
                 }
                 .buttonStyle(.primary)
-                .frame(maxWidth: 360)
+                .frame(maxWidth: layout == .compact ? .infinity : 360)
                 .accessibilityIdentifier("play-again")
             }
             Button("Leave") { confirmLeave = true }
                 .buttonStyle(.text)
+                .accessibilityIdentifier("podium-leave")
         }
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, layout.pagePadding)
         .padding(.top, 10)
         .padding(.bottom, 8)
         .background(Palette.bg)

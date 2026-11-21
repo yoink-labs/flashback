@@ -1,0 +1,176 @@
+/* Wide (≥ 900 px): two-pane layouts. Must come after every screen file it overrides. */
+
+/* ---- wide (≥ 900 px): the bunch is the canvas, room controls on the right ---- */
+
+@media (min-width: 900px) {
+  .lobby {
+    max-width: none;
+    height: 100dvh;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 360px;
+    grid-template-rows: minmax(0, 1fr) auto;
+    column-gap: 40px;
+    row-gap: 0;
+    padding: calc(24px + env(safe-area-inset-top)) 32px 0;
+    overflow: hidden;
+  }
+
+  .lobby-bunch {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+
+  .lobby-room {
+    grid-column: 2;
+    grid-row: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 4px 16px;
+    margin: 0 -4px;
+    scrollbar-width: thin;
+  }
+
+  .lobby-top {
+    position: static;
+    margin-left: -10px;
+    margin-bottom: -12px;
+  }
+
+  .lobby-code {
+    align-items: flex-start;
+  }
+
+  .code-hero {
+    padding-left: 0;
+  }
+
+  .lobby-bar {
+    grid-column: 2;
+    grid-row: 2;
+    position: static;
+    margin: 0;
+    box-shadow: none;
+    clip-path: none;
+    padding: 16px 0 calc(24px + env(safe-area-inset-bottom));
+  }
+
+  .lobby-bar .btn {
+    max-width: none;
+  }
+
+  .players-row {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 4px;
+    padding: 0;
+    margin: 0;
+    overflow: visible;
+  }
+
+  .player-chip {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    width: auto;
+    min-height: 48px;
+  }
+
+  .player-chip .avatar-lg {
+    width: 40px;
+    height: 40px;
+    font-size: 16px;
+  }
+
+  .player-chip-name {
+    font-size: 16px;
+    color: var(--text);
+  }
+
+  .player-add {
+    width: 40px;
+    height: 40px;
+  }
+
+  .invite-chip .player-chip-name {
+    color: var(--text-2);
+  }
+
+  .crown {
+    top: -5px;
+    right: -5px;
+    width: 17px;
+    height: 17px;
+  }
+
+  /* The canvas: a size container, so 12 (or 6) tiles fill it without scrolling.
+     4 × 3 when the pane is wider than tall, 3 × 4 otherwise (videos 3 × 2 / 2 × 3). */
+  .bunch {
+    flex: 1;
+    min-height: 0;
+    container: bunch / size;
+    --chrome: 136px;
+  }
+
+  .bunch:has(.steps) {
+    --chrome: 188px;
+  }
+
+  .bunch:has(.bunch-short) {
+    --chrome: 160px;
+  }
+
+  .bunch:has(.steps):has(.bunch-short) {
+    --chrome: 212px;
+  }
+
+  .bunch-frame {
+    --cols: 3;
+    --rows: 4;
+    --tile: min((100cqw - (var(--cols) - 1) * var(--gap)) / var(--cols), (100cqh - var(--chrome) - (var(--rows) - 1) * var(--gap)) / var(--rows));
+    width: calc(var(--tile) * var(--cols) + (var(--cols) - 1) * var(--gap));
+    min-width: min(100%, 420px);
+    height: 100%;
+    margin: 0 auto;
+  }
+
+  .bunch.is-empty .bunch-frame {
+    width: 100%;
+  }
+
+  .bunch-video .bunch-frame {
+    --cols: 2;
+    --rows: 3;
+  }
+
+  @container bunch (orientation: landscape) {
+    .bunch-frame {
+      --cols: 4;
+      --rows: 3;
+    }
+    .bunch-video .bunch-frame {
+      --cols: 3;
+      --rows: 2;
+    }
+  }
+
+  .bunch-grid.n12,
+  .bunch-grid.n6 {
+    grid-template-columns: repeat(var(--cols), var(--tile));
+    justify-content: center;
+  }
+
+  .bunch-slot {
+    width: var(--tile);
+  }
+
+  .bunch-empty {
+    flex: 1;
+    min-height: 0;
+  }
+}

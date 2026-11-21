@@ -1,0 +1,21 @@
+/* Sign-in screen. */
+
+/* ---- auth ---- */
+
+.auth-screen {
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.auth-back {
+  align-self: flex-start;
+}
+
+.auth-mount {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}

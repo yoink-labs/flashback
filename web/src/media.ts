@@ -7,6 +7,7 @@
 // Originals are never uploaded, and nothing is prepared until the player has
 // readied up (one item is kept ready in the background — see deck.ts).
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
+import type { MediaKind } from './types';
 
 export const LIMITS = {
   photoMaxBytes: 3 * 1024 * 1024,
@@ -44,22 +45,55 @@ export function fitWithin(width: number, height: number, maxEdge: number, even =
 }
 
 export const isVideoFile = (file: File) => file.type.startsWith('video/') || /\.(mov|mp4|m4v|webm)$/i.test(file.name);
+const isImageFile = (file: File) => file.type.startsWith('image/') || /\.(jpe?g|png|gif|webp|heic|heif|avif)$/i.test(file.name);
+
+/** The pool kind of a picked file, or null when it is neither a photo nor a video. */
+export const mediaKindOf = (file: File): MediaKind | null => (isVideoFile(file) ? 'video' : isImageFile(file) ? 'photo' : null);
 
 // ---- photos ----
 
-export async function preparePhoto(file: File): Promise<Blob> {
-  let bitmap: ImageBitmap;
+export interface DecodedImage {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  close: () => void;
+}
+
+/**
+ * Decodes a photo so it can be drawn: createImageBitmap first, then an <img>
+ * (Safari opens HEIC that way when createImageBitmap refuses it). Throws
+ * MediaPrepError when the browser can't open it at all (HEIC in Chrome).
+ */
+export async function decodeImage(file: File): Promise<DecodedImage> {
   try {
-    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
   } catch {
+    // Fall back to the image element below.
+  }
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  image.src = url;
+  try {
+    await image.decode();
+  } catch {
+    URL.revokeObjectURL(url);
     throw new MediaPrepError(`This browser can't open “${file.name}”. Try a JPEG or PNG.`);
   }
-  const { width, height } = fitWithin(bitmap.width, bitmap.height, LIMITS.photoMaxEdge);
+  return { source: image, width: image.naturalWidth, height: image.naturalHeight, close: () => URL.revokeObjectURL(url) };
+}
+
+export async function preparePhoto(file: File): Promise<Blob> {
+  const image = await decodeImage(file);
+  const { width, height } = fitWithin(image.width, image.height, LIMITS.photoMaxEdge);
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
-  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close();
+  try {
+    canvas.getContext('2d')!.drawImage(image.source, 0, 0, width, height);
+  } finally {
+    image.close();
+  }
   for (const quality of [LIMITS.photoQuality, 0.7, 0.55, 0.4]) {
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
     if (blob && blob.size <= LIMITS.photoMaxBytes) return blob;
@@ -70,6 +104,17 @@ export async function preparePhoto(file: File): Promise<Blob> {
 // ---- videos ----
 
 const H264_CODECS = ['avc1.42001f', 'avc1.4d401f', 'avc1.640028'];
+
+let videoSupport: Promise<boolean> | null = null;
+
+/**
+ * Whether this browser can turn a clip into the shared H.264 MP4 (WebCodecs).
+ * Older Safari and some Firefox builds can't; they can still play photos.
+ */
+export function canConvertVideos(): Promise<boolean> {
+  videoSupport ??= pickVideoConfig(720, 404).then(Boolean, () => false);
+  return videoSupport;
+}
 
 async function pickVideoConfig(width: number, height: number): Promise<VideoEncoderConfig | null> {
   if (typeof VideoEncoder === 'undefined') return null;

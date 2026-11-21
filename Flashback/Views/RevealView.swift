@@ -42,27 +42,23 @@ struct RevealView: View {
         }
     }
 
+    /// Media is the leading pane (full height), guesses the trailing pane; the
+    /// gap between them sits on the fold, so no avatar is ever in the curve.
     private func wide(_ proxy: GeometryProxy) -> some View {
         VStack(spacing: 0) {
             timerBar
-            HStack(spacing: 20) {
+            TwoPane { _ in
                 stage(radius: Radius.media, gravity: .resizeAspect)
                     .padding(.leading, 20)
                     .padding(.vertical, 20)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                GeometryReader { column in
-                    ScrollView(.vertical, showsIndicators: false) {
-                        panel(compact: false)
-                            .padding(.vertical, 20)
-                            .frame(minHeight: column.size.height, alignment: .center)
-                    }
+            } trailing: { pane in
+                ScrollView(.vertical, showsIndicators: false) {
+                    panel(compact: false)
+                        .padding(.vertical, 20)
+                        .frame(minHeight: pane.height, alignment: .center)
                 }
-                .frame(width: 360)
-                .frame(maxHeight: .infinity)
                 .padding(.trailing, 20)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -86,10 +82,13 @@ struct RevealView: View {
                 PlayerLayerView(player: player, gravity: gravity)
             } else if let image = room.revealImage {
                 if layout == .wide {
+                    // Fit on wide; the save button sits on the photo itself, not
+                    // in the letterbox.
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
                         .accessibilityLabel("Whose is this?")
+                        .overlay(alignment: .bottomLeading) { SaveMediaButton().padding(14) }
                 } else {
                     // Fill the box without letting the image's own size grow the
                     // stage (a bare scaledToFill image overflows its frame).
@@ -118,16 +117,15 @@ struct RevealView: View {
                 ProgressView().tint(Palette.text2)
             }
 
-            if round.kind == .video {
-                VStack {
-                    Spacer(minLength: 0)
-                    HStack {
-                        Spacer(minLength: 0)
-                        muteButton
-                    }
-                }
-                .padding(14)
+            // Save and mute sit on the media: bottom-trailing on a phone,
+            // bottom-leading on wide (away from the fold).
+            HStack(spacing: 10) {
+                if layout.isWide && round.kind == .video { SaveMediaButton() }
+                if round.kind == .video { muteButton }
+                if !layout.isWide { SaveMediaButton() }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: layout.isWide ? .bottomLeading : .bottomTrailing)
+            .padding(14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
@@ -139,13 +137,9 @@ struct RevealView: View {
             room.setMuted(!playback.muted)
             Haptics.tick()
         } label: {
-            Image(systemName: playback.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 40, height: 40)
-                .background(.black.opacity(0.5), in: Circle())
+            Label(playback.muted ? "Unmute" : "Mute", systemImage: playback.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.mediaCircle)
         .accessibilityLabel(playback.muted ? "Unmute" : "Mute")
         .accessibilityIdentifier("mute")
     }
@@ -155,7 +149,7 @@ struct RevealView: View {
     private var timerBar: some View {
         TimelineView(.periodic(from: .now, by: 0.1)) { _ in
             let total = max(1, (round.endsAt ?? 0) - (round.revealAt ?? 0))
-            let left = max(0, (round.endsAt ?? room.serverNow) - room.serverNow)
+            let left = view.remainingMs(until: round.endsAt, now: room.serverNow)
             let fraction = min(1, max(0, left / total))
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
@@ -173,7 +167,7 @@ struct RevealView: View {
 
     private var secondsLeft: some View {
         TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-            let left = max(0, (round.endsAt ?? room.serverNow) - room.serverNow) / 1000
+            let left = view.remainingMs(until: round.endsAt, now: room.serverNow) / 1000
             Text("\(Int(left.rounded(.up)))")
                 .font(.flCaption)
                 .monospacedDigit()
@@ -206,7 +200,7 @@ struct RevealView: View {
                 spacing: 18
             ) {
                 ForEach(view.players) { player in
-                    GuessAvatar(player: player, view: view, round: round, enabled: round.canGuess == true) {
+                    GuessAvatar(player: player, view: view, round: round, enabled: view.canGuess) {
                         room.send(.guess(player.id))
                         Haptics.lock()
                     }
