@@ -381,6 +381,11 @@ function normalizeRound(raw: RoundView | null | undefined): RoundView | null {
   if (!raw) return null;
   return {
     ...raw,
+    // M5 sends `revealAt: null` until the countdown's time is fixed (and again
+    // while paused); kind/effect/yourEffect are absent until then.
+    revealAt: typeof raw.revealAt === 'number' && Number.isFinite(raw.revealAt) ? raw.revealAt : undefined,
+    endsAt: typeof raw.endsAt === 'number' && Number.isFinite(raw.endsAt) ? raw.endsAt : undefined,
+    kind: raw.kind === 'photo' || raw.kind === 'video' ? raw.kind : undefined,
     yourEffect: normalizeStreakEffect(raw.yourEffect),
     effect: normalizeRoundEffect(raw.effect),
     eliminated: Array.isArray(raw.eliminated) ? raw.eliminated.filter((id): id is string => typeof id === 'string') : [],
@@ -455,6 +460,8 @@ export type ServerMessage =
   | { type: 'session'; token: string; expiresAt: number }
   | { type: 'error'; message: string; request?: string }
   | { type: 'closed'; reason: string }
+  /** M5 §2: echoes the ping's id. An M4 server sends no id; ignore those. */
+  | { type: 'pong'; id?: number; serverNow: number }
   | TurnMessage;
 
 // ---- client → server ----
@@ -468,11 +475,16 @@ export type ClientMessage =
   | { type: 'start' }
   | { type: 'pause' }
   | { type: 'resume' }
-  | { type: 'guess'; targetID: string }
+  /** M5 §4: elapsedMs is optional so an M4 server (and M4 timing) still works. */
+  | { type: 'guess'; targetID: string; elapsedMs?: number }
   | { type: 'useFiftyFifty' }
   | { type: 'buy'; item: ShopItem }
   | { type: 'advance' }
   | { type: 'end' }
   | { type: 'playAgain' }
   | { type: 'leave' }
-  | { type: 'ping' };
+  | { type: 'ping'; id?: number }
+  /** M5 §1: sent once after the first state on every socket open. */
+  | { type: 'hello'; caps: string[] }
+  /** M5 §3: this client has the round's media decoded and ready to show. */
+  | { type: 'mediaReady'; round: number };

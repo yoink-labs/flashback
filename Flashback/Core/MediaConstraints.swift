@@ -4,8 +4,11 @@ import Foundation
 /// Limits shared with the Worker (worker/src/media.ts) and the web app (web/src/media.ts).
 enum MediaConstraints {
     static let photoMaxBytes = 3 * 1024 * 1024
-    /// Long edge of an uploaded photo. Small payloads keep the Durable Object cheap.
-    static let photoMaxPixel: CGFloat = 1440
+    /// Photos scale by area, not long edge (Milestone 5 §6): 1440 × 1080 keeps
+    /// a 4:3 photo's detail, while a panorama keeps its width.
+    static let photoMaxArea: CGFloat = 1_555_200
+    /// Hard ceiling on the resulting long edge.
+    static let photoMaxLongEdge: CGFloat = 3072
     static let photoQuality = 0.78
     static let videoMaxBytes = 8 * 1024 * 1024
     static let clipTargetSeconds = 6.0
@@ -24,11 +27,25 @@ enum MediaConstraints {
         return (start, length)
     }
 
-    /// Pixel size that fits within `maxPixel` on the long edge, never upscaling.
-    static func fit(_ size: CGSize, maxPixel: CGFloat = photoMaxPixel) -> CGSize {
+    /// The upload size for a source photo (Milestone 5 §6), never upscaling:
+    /// `scale = min(1, sqrt(area / (w × h)), longEdge / max(w, h))`.
+    static func fit(_ size: CGSize) -> CGSize {
         guard size.width > 0, size.height > 0 else { return .zero }
-        let scale = min(1, maxPixel / max(size.width, size.height))
+        let scale = min(
+            1,
+            sqrt(photoMaxArea / (size.width * size.height)),
+            photoMaxLongEdge / max(size.width, size.height)
+        )
         return CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+    }
+
+    /// The long edge of the thumbnail to ask ImageIO for: the resulting long
+    /// edge of `fit`. Falls back to the long-edge ceiling when the source size
+    /// can't be read.
+    static func thumbnailLongEdge(width: Double, height: Double) -> CGFloat {
+        let fitted = fit(CGSize(width: width, height: height))
+        guard fitted != .zero else { return photoMaxLongEdge }
+        return max(fitted.width, fitted.height)
     }
 
     static func validate(bytes: Int, kind: MediaKind) throws {

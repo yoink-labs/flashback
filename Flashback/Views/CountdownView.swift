@@ -42,7 +42,10 @@ struct CountdownRing: View {
     static let lengthMs: Double = 3000
 
     private var round: RoundView? { view.round }
-    /// No deadline yet means the upload is still on its way.
+    /// Milestone 5 §3: `waiting` now means the reveal time isn't fixed yet —
+    /// the upload, the other players' acks, or both are still on their way.
+    /// (A fixed countdown past its reveal time is replaced by the reveal
+    /// screen, so this ring only shows before that.)
     private var waiting: Bool { round?.isWaiting == true || !view.hasDeadline }
 
     var body: some View {

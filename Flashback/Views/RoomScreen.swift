@@ -14,13 +14,14 @@ struct RoomScreen: View {
     var body: some View {
         NavigationStack {
             KeyboardStableLayout { layout, _ in
+                let shown = room.displayedView
                 ZStack {
                     Palette.bg.ignoresSafeArea()
                     VStack(spacing: 0) {
                         banner
-                        if let view = room.view {
-                            phase(view, layout: layout)
-                                .id(view.phase)
+                        if let shown {
+                            phase(shown, layout: layout)
+                                .id(shown.phase)
                                 .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.96)))
                         } else {
                             joining
@@ -35,7 +36,7 @@ struct RoomScreen: View {
                     }
                 }
                 .overlay(alignment: .top) { toast(layout) }
-                .animation(Motion.phase(reduceMotion), value: room.view?.phase)
+                .animation(Motion.phase(reduceMotion), value: shown?.phase)
                 .animation(Motion.state(reduceMotion), value: room.view?.paused)
                 .animation(Motion.state(reduceMotion), value: room.toast)
             }

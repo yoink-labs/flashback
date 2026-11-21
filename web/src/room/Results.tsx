@@ -2,7 +2,7 @@
 // what they earned and where they moved. No separate guesses and standings.
 // docs/MILESTONE4.md: the you card explains the bonus/power-up maths and the
 // shop strip sits under it.
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   DEFAULT_PRICES,
   SHOP_ITEMS,
@@ -18,7 +18,7 @@ import { Avatar, playerColor, playerIndex } from '../ui/Avatar';
 import { CheckIcon, CoinIcon, CrossIcon, DieIcon, ScissorsIcon, ShieldIcon } from '../ui/Icons';
 import { ItemIcons } from '../ui/ItemIcons';
 import { SaveButton } from '../ui/SaveButton';
-import { mediaKey, type RoomController } from '../useRoom';
+import { mediaKey, type MediaEntry, type MediaReadyInfo, type RoomController } from '../useRoom';
 import { HubVideo } from './PlaybackHub';
 import { clockOf, DrainBar, GameBar, useSecondsLeft, type Clock } from './Timing';
 
@@ -42,7 +42,8 @@ export function Results({ view, room, isHost }: { view: RoomView; room: RoomCont
   if (!result) return <p className="caption center-text">Working out the scores…</p>;
 
   const owner = view.players.find((player) => player.id === result.ownerID);
-  const entry = room.media[mediaKey(view.game, result.index)];
+  const mediaID = mediaKey(view.game, result.index);
+  const entry = room.media[mediaID];
   const myRow = result.rows.find((row) => row.playerID === view.you.id);
   const mine = result.ownerID === view.you.id;
   const standings = buildStandings(view, result.rows);
@@ -68,11 +69,7 @@ export function Results({ view, room, isHost }: { view: RoomView; room: RoomCont
 
       <header className="result-hero">
         <div className="result-media">
-          {entry ? (
-            entry.kind === 'video' ? <ResultVideo url={entry.url} paused={view.paused} /> : <img src={entry.url} alt="" />
-          ) : (
-            <span className="result-media-empty" />
-          )}
+          <ResultMedia entry={entry} size={room.ready[mediaID]} paused={view.paused} />
           <SaveButton entry={entry} round={result.index} className="on-media" />
         </div>
         <div className="result-who">
@@ -183,8 +180,18 @@ function breakdownLines(row: ResultRow | undefined): BreakdownLine[] {
   return lines;
 }
 
-function ResultVideo({ url, paused }: { url: string; paused: boolean }) {
-  return <HubVideo src={url} playing={!paused} loop className="result-video" />;
+/**
+ * docs/MILESTONE5.md §6: the results media is whole too, in a box with its own
+ * aspect ratio; the tile's dark background is the letterbox.
+ */
+function ResultMedia({ entry, size, paused }: { entry: MediaEntry | undefined; size: MediaReadyInfo | undefined; paused: boolean }) {
+  if (!entry) return <span className="result-media-empty" />;
+  const ratio = size && size.width > 0 && size.height > 0 ? size.width / size.height : 16 / 9;
+  return (
+    <div className="result-fit" style={{ '--ar': ratio } as CSSProperties}>
+      {entry.kind === 'video' ? <HubVideo src={entry.url} playing={!paused} loop className="result-video" /> : <img src={entry.url} alt="" />}
+    </div>
+  );
 }
 
 /** "Yours" line for the owner: how many of the others spotted it. */

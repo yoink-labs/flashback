@@ -348,7 +348,9 @@ export class Room extends DurableObject<Env> {
       return;
     }
     if (message.type === 'ping') {
-      this.send(ws, JSON.stringify({ type: 'pong', serverNow: now }));
+      // The id lets a client pair each pong with its ping for clock sync (MILESTONE5 §2).
+      const id = Number.isSafeInteger(message.id) ? message.id : undefined;
+      this.send(ws, JSON.stringify({ type: 'pong', id, serverNow: now }));
       return;
     }
     try {
@@ -418,7 +420,9 @@ export type ClientMessage =
     }
   | { type: 'deck'; photos?: unknown; videos?: unknown }
   | { type: 'start' }
-  | { type: 'guess'; targetID: unknown }
+  | { type: 'guess'; targetID: unknown; elapsedMs?: unknown }
+  | { type: 'hello'; caps?: unknown }
+  | { type: 'mediaReady'; round?: unknown }
   | { type: 'useFiftyFifty' }
   | { type: 'buy'; item?: unknown }
   | { type: 'pass'; slot: string }
@@ -429,7 +433,7 @@ export type ClientMessage =
   | { type: 'end' }
   | { type: 'playAgain' }
   | { type: 'leave' }
-  | { type: 'ping' };
+  | { type: 'ping'; id?: unknown };
 
 export function apply(game: Game, playerID: string, message: ClientMessage, now: number) {
   switch (message.type) {
@@ -455,7 +459,11 @@ export function apply(game: Game, playerID: string, message: ClientMessage, now:
     case 'start':
       return game.start(playerID, now);
     case 'guess':
-      return game.guess(playerID, message.targetID, now);
+      return game.guess(playerID, message.targetID, now, message.elapsedMs);
+    case 'hello':
+      return game.hello(playerID, message.caps);
+    case 'mediaReady':
+      return game.mediaReady(playerID, message.round, now);
     case 'useFiftyFifty':
       return game.useFiftyFifty(playerID, now);
     case 'buy':

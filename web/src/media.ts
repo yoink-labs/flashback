@@ -1,17 +1,19 @@
 // Client-side media preparation so web players match iOS players:
-//   • Photos: decoded, resized to 1440 px on the long edge, re-encoded as JPEG
-//     (quality ~0.78, typically 150–400 KB). Re-encoding drops EXIF, including GPS.
+//   • Photos: decoded, scaled to the area budget from docs/MILESTONE5.md §6,
+//     re-encoded as JPEG (quality ~0.78, typically 150–400 KB). A 4:3 photo
+//     stays 1440 × 1080; a panorama keeps its shape instead of becoming a
+//     sliver. Re-encoding drops EXIF, including GPS.
 //   • Videos: a random 6-second window (shorter if the video is shorter) is
 //     re-encoded to an H.264 MP4 at about 1.5 Mbps, up to 720p, with AAC audio
 //     when the browser can encode it. Uses WebCodecs and mp4-muxer (MIT).
 // Originals are never uploaded, and nothing is prepared until the player has
 // readied up (one item is kept ready in the background — see deck.ts).
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
+import { photoSize } from './fair';
 import type { MediaKind } from './types';
 
 export const LIMITS = {
   photoMaxBytes: 3 * 1024 * 1024,
-  photoMaxEdge: 1440,
   photoQuality: 0.78,
   videoMaxBytes: 8 * 1024 * 1024,
   videoMaxEdge: 720,
@@ -85,7 +87,7 @@ export async function decodeImage(file: File): Promise<DecodedImage> {
 
 export async function preparePhoto(file: File): Promise<Blob> {
   const image = await decodeImage(file);
-  const { width, height } = fitWithin(image.width, image.height, LIMITS.photoMaxEdge);
+  const { width, height } = photoSize(image.width, image.height);
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;

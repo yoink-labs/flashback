@@ -216,7 +216,8 @@ struct PlayerView: Codable, Equatable, Identifiable {
     }
 }
 
-/// `countdown`: `{ index, total, waiting }`.
+/// `countdown`: `{ index, total, waiting }`, plus — once the reveal time is
+/// fixed (Milestone 5 §3) — `revealAt`, `kind`, `effect`, `yourEffect`.
 /// `reveal`: `{ index, total, kind, revealAt, endsAt, canGuess, yourGuess, guessedCount, guesserCount }`
 /// plus the Milestone 4 viewer-only fields: `yourEffect`, `eliminated`.
 struct RoundView: Codable, Equatable {
@@ -272,7 +273,8 @@ struct RoundView: Codable, Equatable {
         self.shop = shop
     }
 
-    /// True while the server is still waiting for the owner's upload.
+    /// Countdown only: the reveal time isn't fixed yet (§3) — the upload,
+    /// the other players' media acknowledgements, or both are still coming.
     var isWaiting: Bool { waiting == true }
 
     private enum CodingKeys: String, CodingKey {
@@ -280,19 +282,21 @@ struct RoundView: Codable, Equatable {
         case guessedCount, guesserCount, yourEffect, effect, eliminated, shop
     }
 
-    /// Old servers send none of the Milestone 4 fields.
+    /// Old servers send none of the Milestone 4/5 fields; Milestone 5 adds
+    /// `revealAt`, `kind`, `effect` and `yourEffect` to the countdown. Every
+    /// field decodes as absent rather than failing the whole round.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        index = try c.decodeIfPresent(Int.self, forKey: .index) ?? 1
-        total = try c.decodeIfPresent(Int.self, forKey: .total) ?? 1
-        waiting = try c.decodeIfPresent(Bool.self, forKey: .waiting)
-        kind = try c.decodeIfPresent(MediaKind.self, forKey: .kind)
-        revealAt = try c.decodeIfPresent(Double.self, forKey: .revealAt)
-        endsAt = try c.decodeIfPresent(Double.self, forKey: .endsAt)
-        canGuess = try c.decodeIfPresent(Bool.self, forKey: .canGuess)
-        yourGuess = try c.decodeIfPresent(String.self, forKey: .yourGuess)
-        guessedCount = try c.decodeIfPresent(Int.self, forKey: .guessedCount)
-        guesserCount = try c.decodeIfPresent(Int.self, forKey: .guesserCount)
+        index = (try? c.decodeIfPresent(Int.self, forKey: .index)) ?? 1
+        total = (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? 1
+        waiting = try? c.decodeIfPresent(Bool.self, forKey: .waiting)
+        kind = try? c.decodeIfPresent(MediaKind.self, forKey: .kind)
+        revealAt = try? c.decodeIfPresent(Double.self, forKey: .revealAt)
+        endsAt = try? c.decodeIfPresent(Double.self, forKey: .endsAt)
+        canGuess = try? c.decodeIfPresent(Bool.self, forKey: .canGuess)
+        yourGuess = try? c.decodeIfPresent(String.self, forKey: .yourGuess)
+        guessedCount = try? c.decodeIfPresent(Int.self, forKey: .guessedCount)
+        guesserCount = try? c.decodeIfPresent(Int.self, forKey: .guesserCount)
         yourEffect = try? c.decodeIfPresent(YourEffect.self, forKey: .yourEffect)
         effect = try? c.decodeIfPresent(RoundEffect.self, forKey: .effect)
         eliminated = (try? c.decodeIfPresent([String].self, forKey: .eliminated)) ?? []
@@ -556,23 +560,35 @@ enum ClientMessage: Encodable {
         effects: EffectsSettings? = nil,
         powerups: PowerupSettings? = nil
     )
-    case start, advance, end, playAgain, leave, ping, pause, resume
-    case guess(String)
+    case start, advance, end, playAgain, leave, pause, resume
+    /// `{ "type": "hello", "caps": ["fairReveal"] }` on every socket open (§1).
+    case hello([String])
+    /// `{ "type": "ping", "id": 7 }`; pongs echo the id so the client can
+    /// measure its round trip and offset (§2).
+    case ping(id: Int?)
+    /// `elapsedMs` is measured at the tap (§4); old servers ignore it.
+    case guess(String, elapsedMs: Double)
     case deck(DeckCount)
     case pass(String)
     case needMedia(Int)
+    /// `{ "type": "mediaReady", "round": 3 }` once this round's media is
+    /// decoded and ready to show (§3).
+    case mediaReady(round: Int)
     case useFiftyFifty
     case buy(ShopItem)
 
     private enum Key: String, CodingKey {
         case type, ready, rounds, timerSeconds, mediaMode, breakSeconds, swaps, evenSplit, effects, powerups
-        case targetID, photos, videos, slot, round, item
+        case targetID, photos, videos, slot, round, item, caps, id, elapsedMs
     }
 
     var isPing: Bool {
         if case .ping = self { return true }
         return false
     }
+
+    /// The capabilities this client understands (§1).
+    static let caps = ["fairReveal"]
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: Key.self)
@@ -597,12 +613,18 @@ enum ClientMessage: Encodable {
         case .end: try c.encode("end", forKey: .type)
         case .playAgain: try c.encode("playAgain", forKey: .type)
         case .leave: try c.encode("leave", forKey: .type)
-        case .ping: try c.encode("ping", forKey: .type)
+        case .hello(let caps):
+            try c.encode("hello", forKey: .type)
+            try c.encode(caps, forKey: .caps)
+        case .ping(let id):
+            try c.encode("ping", forKey: .type)
+            try c.encodeIfPresent(id, forKey: .id)
         case .pause: try c.encode("pause", forKey: .type)
         case .resume: try c.encode("resume", forKey: .type)
-        case .guess(let target):
+        case .guess(let target, let elapsedMs):
             try c.encode("guess", forKey: .type)
             try c.encode(target, forKey: .targetID)
+            try c.encode(elapsedMs, forKey: .elapsedMs)
         case .deck(let count):
             try c.encode("deck", forKey: .type)
             try c.encode(count.photos, forKey: .photos)
@@ -612,6 +634,9 @@ enum ClientMessage: Encodable {
             try c.encode(slot, forKey: .slot)
         case .needMedia(let round):
             try c.encode("needMedia", forKey: .type)
+            try c.encode(round, forKey: .round)
+        case .mediaReady(let round):
+            try c.encode("mediaReady", forKey: .type)
             try c.encode(round, forKey: .round)
         case .useFiftyFifty:
             try c.encode("useFiftyFifty", forKey: .type)
@@ -638,6 +663,10 @@ struct ServerMessage: Decodable {
     var kind: MediaKind?
     /// For `error`: which client message failed.
     var request: String? = nil
+    /// For `pong`: the id echoed from the client's `ping` (Milestone 5 §2).
+    var id: Int? = nil
+    /// For `pong`: the server's clock when it answered.
+    var serverNow: Double? = nil
 
     init(
         type: String,
@@ -650,7 +679,9 @@ struct ServerMessage: Decodable {
         game: Int? = nil,
         round: Int? = nil,
         mode: MediaMode? = nil,
-        kind: MediaKind? = nil
+        kind: MediaKind? = nil,
+        id: Int? = nil,
+        serverNow: Double? = nil
     ) {
         self.type = type
         self.kind = kind
@@ -663,5 +694,7 @@ struct ServerMessage: Decodable {
         self.game = game
         self.round = round
         self.mode = mode
+        self.id = id
+        self.serverNow = serverNow
     }
 }

@@ -344,13 +344,13 @@ final class EffectMathTests: XCTestCase {
     func testStreakBlurStacksWithFocus() {
         let blur = YourEffect(kind: .blur, strength: .heavy, trigger: .wrong, streak: 5)
         // Heavy streak (7 %) plus focus at its start (8 %).
-        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: blur, round: RoundEffect(kind: .focus, spanMs: 1000), progress: 0), 15, accuracy: 0.001)
+        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: blur, round: RoundEffect(kind: .focus, spanMs: 1000), progress: 0, elapsedMs: 0, timerMs: 20_000), 15, accuracy: 0.001)
         // At the end of focus only the streak effect's blur remains.
-        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: blur, round: RoundEffect(kind: .focus, spanMs: 1000), progress: 1), 7, accuracy: 0.001)
+        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: blur, round: RoundEffect(kind: .focus, spanMs: 1000), progress: 1, elapsedMs: 0, timerMs: 20_000), 7, accuracy: 0.001)
         // Zoom doesn't blur.
-        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: nil, round: RoundEffect(kind: .zoom, spanMs: 1000), progress: 0), 0, accuracy: 0.001)
+        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: nil, round: RoundEffect(kind: .zoom, spanMs: 1000), progress: 0, elapsedMs: 0, timerMs: 20_000), 0, accuracy: 0.001)
         let greyscale = YourEffect(kind: .greyscale, trigger: .right, streak: 3)
-        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: greyscale, round: nil, progress: 0), 0, accuracy: 0.001)
+        XCTAssertEqual(EffectMath.blurRadius(shorterSide: 100, streak: greyscale, round: nil, progress: 0, elapsedMs: 0, timerMs: 20_000), 0, accuracy: 0.001)
     }
 }
 
