@@ -1,21 +1,32 @@
 // The Flashback room state machine. Pure and deterministic: time and randomness
-// are passed in, and side effects (media deletions, room teardown) are returned
-// for the Durable Object to perform. The Durable Object is a thin adapter.
+// are passed in, and side effects (turns to request, media bytes to free, room
+// teardown) are returned for the Durable Object to perform. The Durable Object is
+// a thin adapter.
 //
 // Phases: lobby → countdown → reveal → results → (countdown … | podium) → lobby
 //
-// Start rule (shown in the lobby UI): the host can start when at least two
-// players are in the room, every player is ready, and every player has added at
-// least one photo or video that fits the media mode. Players cannot ready up
-// until they have added something that fits.
-import { kindAllowed, ITEMS_PER_PLAYER, MEDIA_TTL_MS, type MediaKind, type MediaMode } from './media';
+// Milestone 2: nothing is uploaded in the lobby. Each round asks one player's
+// device for one item just before it is shown (with one round of lookahead) and
+// the Durable Object holds only that item, in memory. Everyone guesses each
+// round, including the item's owner; nobody learns the owner before results.
+//
+// Start rule: the host can start when at least two players are in the room,
+// every other player is ready (pressing Start is the host's ready), and every
+// player's local deck has at least one item that fits the media mode.
+import { kindAllowed, type MediaKind, type MediaMode } from './media';
 import { assertUniqueNickname, normalizeNickname } from './nickname';
 import { rankFinal, rankRound, scoreGuess } from './scoring';
 
 export const CAPACITY = 12;
 export const MIN_PLAYERS = 2;
+/** How many rounds ahead a slot is opened (the current round and the next). */
+export const LOOKAHEAD = 2;
 export const COUNTDOWN_MS = 3_000;
-export const RESULTS_MS = 8_000;
+/** After the round's media is ready, give every client time to receive it. */
+export const MEDIA_SETTLE_MS = 1_200;
+/** A requested slot with no upload is reassigned after this long. */
+export const UPLOAD_TIMEOUT_MS = 20_000;
+export const RESULTS_MS = 7_000;
 /** A dropped player keeps their seat this long (app switch, fold, flaky Wi-Fi). */
 export const DISCONNECT_GRACE_MS = 90_000;
 /** A room with nobody connected is torn down after this. */
@@ -24,8 +35,9 @@ export const EMPTY_ROOM_GRACE_MS = 2 * 60_000;
 export const FINISHED_ROOM_GRACE_MS = 15 * 60_000;
 /** Lobbies with no activity are torn down after this. */
 export const IDLE_ROOM_MS = 60 * 60_000;
-export const ROUNDS = { min: 1, max: 20, default: 5 } as const;
+export const ROUNDS = { min: 1, max: 30, default: 10 } as const;
 export const TIMER_SECONDS = { min: 10, max: 60, default: 20 } as const;
+export const DECK_MAX = 500;
 export const MEDIA_MODES: readonly MediaMode[] = ['photos', 'videos', 'both'];
 
 export type Phase = 'lobby' | 'countdown' | 'reveal' | 'results' | 'podium' | 'closed';
@@ -34,6 +46,12 @@ export interface Settings {
   rounds: number;
   timerSeconds: number;
   mediaMode: MediaMode;
+}
+
+/** Counts of the items a player currently has available in their local deck. */
+export interface Deck {
+  photos: number;
+  videos: number;
 }
 
 export interface Player {
@@ -47,6 +65,7 @@ export interface Player {
   connected: boolean;
   disconnectedAt: number | null;
   ready: boolean;
+  deck: Deck;
   score: number;
   streak: number;
   bestStreak: number;
@@ -54,16 +73,23 @@ export interface Player {
   correctCount: number;
 }
 
-export interface MediaItem {
+/**
+ * "The item for round N." At most LOOKAHEAD of these are open at once. The
+ * Durable Object keeps the uploaded bytes in memory, keyed by slot id.
+ */
+export interface Slot {
+  /** Random, 32 hex. Never sent to clients before results. */
   id: string;
+  round: number;
   ownerID: string;
-  kind: MediaKind;
-  key: string;
-  contentType: string;
-  bytes: number;
-  durationMs?: number;
-  uploadedAt: number;
-  expiresAt: number;
+  status: 'requested' | 'ready';
+  requestedAt: number;
+  kind?: MediaKind;
+  /** Owners asked for this round so far. */
+  attempts: number;
+  readyAt: number | null;
+  /** Players already asked for this round; never picked again for it. */
+  tried: string[];
 }
 
 export interface Guess {
@@ -73,14 +99,13 @@ export interface Guess {
 
 export interface RoundState {
   index: number;
-  itemID: string;
+  slotID: string;
   ownerID: string;
-  kind: MediaKind;
-  /** Random capability for the media URL; valid only during this round's reveal. */
-  capability: string;
+  kind: MediaKind | null;
+  countdownStart: number;
   revealAt: number | null;
   endsAt: number | null;
-  /** Players who may guess this round (everyone present at start except the owner). */
+  /** Everyone connected when the reveal began, including the owner. */
   guessers: string[];
   guesses: Record<string, Guess>;
 }
@@ -105,6 +130,15 @@ export interface RoundResult {
   rows: ResultRow[];
 }
 
+/** A client whose socket should receive a `turn` message for a slot. */
+export interface TurnRequest {
+  playerID: string;
+  slot: string;
+  game: number;
+  round: number;
+  mode: MediaMode;
+}
+
 export interface RoomState {
   code: string;
   instance: string;
@@ -114,7 +148,11 @@ export interface RoomState {
   hostID: string | null;
   settings: Settings;
   players: Player[];
-  items: MediaItem[];
+  slots: Slot[];
+  /** Rounds each player has owned this game (finished rounds only). */
+  owned: Record<string, number>;
+  /** Owner of the most recently finished round. */
+  lastOwnerID: string | null;
   game: number;
   totalRounds: number;
   round: RoundState | null;
@@ -122,7 +160,6 @@ export interface RoomState {
   phaseEndsAt: number | null;
   emptySince: number | null;
   nextJoinSeq: number;
-  shown: Record<string, number>;
 }
 
 export class GameError extends Error {
@@ -158,7 +195,9 @@ export function newRoom(code: string, instance: string, now: number): RoomState 
     hostID: null,
     settings: { rounds: ROUNDS.default, timerSeconds: TIMER_SECONDS.default, mediaMode: 'both' },
     players: [],
-    items: [],
+    slots: [],
+    owned: {},
+    lastOwnerID: null,
     game: 1,
     totalRounds: 0,
     round: null,
@@ -166,22 +205,30 @@ export function newRoom(code: string, instance: string, now: number): RoomState 
     phaseEndsAt: null,
     emptySince: now,
     nextJoinSeq: 1,
-    shown: {},
   };
 }
 
-const intIn = (value: unknown, range: { min: number; max: number }) =>
+const intIn = (value: unknown, range: { min: number; max: number }): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= range.min && value <= range.max;
 
 const modeLabel = (mode: MediaMode) => (mode === 'photos' ? 'a photo' : mode === 'videos' ? 'a video' : 'a photo or video');
 
+/** Whether a deck has at least one item that the media mode can use. */
+export const deckFits = (deck: Deck, mode: MediaMode) =>
+  mode === 'photos' ? deck.photos > 0 : mode === 'videos' ? deck.videos > 0 : deck.photos + deck.videos > 0;
+
 export class Game {
-  /** R2 keys to delete after this mutation. */
-  deletions: string[] = [];
+  /** Turns the Durable Object should deliver (only to each owner's sockets). */
+  turnRequests: TurnRequest[] = [];
+  /** Slots whose media bytes the Durable Object should drop from memory. */
+  freedSlots: string[] = [];
   /** Players removed by this mutation (their sockets should be closed). */
   removed: string[] = [];
 
-  constructor(public state: RoomState, private random: Randomness = defaultRandomness) {}
+  constructor(
+    public state: RoomState,
+    private random: Randomness = defaultRandomness,
+  ) {}
 
   // ---- queries ----
 
@@ -204,17 +251,25 @@ export class Game {
     if (this.state.hostID !== id) throw new GameError(403, 'Only the host can do that.');
   }
 
-  eligibleItems(ownerID?: string) {
-    return this.state.items.filter((i) => kindAllowed(this.state.settings.mediaMode, i.kind) && (!ownerID || i.ownerID === ownerID));
+  private fits(deck: Deck) {
+    return deckFits(deck, this.state.settings.mediaMode);
   }
 
-  /** Why the host cannot start yet, or null if they can. */
-  startBlocker(): string | null {
+  /**
+   * Why the host cannot start yet, worded for one viewer (default: the host),
+   * or null if they can. "You" when it is the viewer's own deck or Ready.
+   */
+  startBlocker(viewerID: string | null = this.state.hostID): string | null {
     const s = this.state;
     if (s.phase !== 'lobby') return 'A game is already running.';
-    if (s.players.length < MIN_PLAYERS) return 'Waiting for at least 2 players.';
-    for (const p of s.players) if (!this.eligibleItems(p.id).length) return `Waiting for ${p.nickname} to add ${modeLabel(s.settings.mediaMode)}.`;
-    for (const p of s.players) if (!p.ready) return `Waiting for ${p.nickname} to ready up.`;
+    if (s.players.length < MIN_PLAYERS) return 'Waiting for players';
+    for (const p of s.players) {
+      if (!this.fits(p.deck)) return p.id === viewerID ? `Add ${modeLabel(s.settings.mediaMode)} to your deck` : `Waiting for ${p.nickname}`;
+    }
+    // The host never presses Ready: pressing Start is their ready.
+    for (const p of s.players) {
+      if (!p.ready && p.id !== s.hostID) return p.id === viewerID ? 'Tap Ready when your deck looks good' : `Waiting for ${p.nickname}`;
+    }
     return null;
   }
 
@@ -246,6 +301,7 @@ export class Game {
       connected: false,
       disconnectedAt: now,
       ready: false,
+      deck: { photos: 0, videos: 0 },
       score: 0,
       streak: 0,
       bestStreak: 0,
@@ -274,6 +330,7 @@ export class Game {
     p.disconnectedAt = now;
     if (this.state.hostID === id) this.transferHost();
     if (!this.state.players.some((x) => x.connected)) this.state.emptySince = now;
+    this.reassignSlotsFor(id, now);
     if (this.state.phase === 'reveal') this.finishIfEveryoneGuessed(now);
   }
 
@@ -291,9 +348,6 @@ export class Game {
     if (!p) return;
     s.players = s.players.filter((x) => x.id !== id);
     this.removed.push(id);
-    // Unused media leaves with its owner. The item on screen right now is
-    // deleted when its round ends.
-    for (const item of s.items.filter((i) => i.ownerID === id && i.id !== s.round?.itemID)) this.dropItem(item);
     if (s.round) s.round.guessers = s.round.guessers.filter((g) => g !== id);
     if (s.hostID === id) {
       const next = [...s.players].sort((a, b) => Number(b.connected) - Number(a.connected) || a.joinSeq - b.joinSeq)[0];
@@ -301,6 +355,8 @@ export class Game {
     }
     s.lastActivityAt = now;
     if (!s.players.length) return this.close();
+    // Any turn that was waiting on the leaver moves on to someone else.
+    this.reassignSlotsFor(id, now);
     if (!s.players.some((x) => x.connected)) s.emptySince ??= now;
     if (s.phase === 'countdown' || s.phase === 'reveal' || s.phase === 'results') {
       if (s.players.length < MIN_PLAYERS) return this.endGame(now);
@@ -310,10 +366,20 @@ export class Game {
 
   // ---- lobby ----
 
+  /** Clients report their local deck size (allowed in any phase). */
+  setDeck(id: string, photos: unknown, videos: unknown, now: number) {
+    const p = this.require(id);
+    if (!intIn(photos, { min: 0, max: DECK_MAX }) || !intIn(videos, { min: 0, max: DECK_MAX }))
+      throw new GameError(422, `Deck counts must be 0–${DECK_MAX}.`);
+    p.deck = { photos, videos };
+    if (p.ready && !this.fits(p.deck)) p.ready = false;
+    this.state.lastActivityAt = now;
+  }
+
   setReady(id: string, ready: boolean, now: number) {
     const p = this.require(id);
     if (this.state.phase !== 'lobby') throw new GameError(409, 'You can only ready up in the lobby.');
-    if (ready && !this.eligibleItems(id).length) throw new GameError(422, `Add ${modeLabel(this.state.settings.mediaMode)} before you ready up.`);
+    if (ready && !this.fits(p.deck)) throw new GameError(422, `Add ${modeLabel(this.state.settings.mediaMode)} before you ready up.`);
     p.ready = ready;
     this.state.lastActivityAt = now;
   }
@@ -325,53 +391,134 @@ export class Game {
     const next = { ...s.settings };
     if (patch.rounds !== undefined) {
       if (!intIn(patch.rounds, ROUNDS)) throw new GameError(422, `Rounds must be ${ROUNDS.min}–${ROUNDS.max}.`);
-      next.rounds = patch.rounds as number;
+      next.rounds = patch.rounds;
     }
     if (patch.timerSeconds !== undefined) {
       if (!intIn(patch.timerSeconds, TIMER_SECONDS)) throw new GameError(422, `The timer must be ${TIMER_SECONDS.min}–${TIMER_SECONDS.max} seconds.`);
-      next.timerSeconds = patch.timerSeconds as number;
+      next.timerSeconds = patch.timerSeconds;
     }
     if (patch.mediaMode !== undefined) {
       if (!MEDIA_MODES.includes(patch.mediaMode as MediaMode)) throw new GameError(422, 'Choose Photos, Videos, or Both.');
       next.mediaMode = patch.mediaMode as MediaMode;
     }
     s.settings = next;
-    // Anyone whose pool no longer fits the mode must add more before readying.
-    for (const p of s.players) if (p.ready && !this.eligibleItems(p.id).length) p.ready = false;
+    // Anyone whose deck no longer fits the mode must add more before readying.
+    for (const p of s.players) if (p.ready && !this.fits(p.deck)) p.ready = false;
     s.lastActivityAt = now;
   }
 
-  /** Throws unless `id` may upload one more item of `kind` right now. */
-  assertCanAdd(id: string, kind: MediaKind) {
+  // ---- slots ----
+
+  /** Finished rounds owned this game plus open slots owned now. */
+  private ownedRounds(id: string) {
+    const s = this.state;
+    return (s.owned?.[id] ?? 0) + s.slots.filter((slot) => slot.ownerID === id).length;
+  }
+
+  /**
+   * Fewest rounds owned so far, avoiding the other open slot's owner and the
+   * previous round's owner when possible, then random. Players already tried
+   * for this round are excluded.
+   */
+  private pickOwner(round: number, tried: string[]): string | null {
+    const s = this.state;
+    const eligible = s.players.filter((p) => p.connected && this.fits(p.deck) && !tried.includes(p.id));
+    if (!eligible.length) return null;
+    const fewest = Math.min(...eligible.map((p) => this.ownedRounds(p.id)));
+    let pool = eligible.filter((p) => this.ownedRounds(p.id) === fewest);
+    const avoid = new Set(s.slots.filter((slot) => slot.round !== round).map((slot) => slot.ownerID));
+    const previous = s.slots.find((slot) => slot.round === round - 1)?.ownerID ?? (s.lastResult?.index === round - 1 ? s.lastOwnerID : null);
+    if (previous) avoid.add(previous);
+    const preferred = pool.filter((p) => !avoid.has(p.id));
+    if (preferred.length) pool = preferred;
+    return pool[Math.floor(this.random.float() * pool.length)].id;
+  }
+
+  private requestTurn(slot: Slot) {
+    this.turnRequests.push({ playerID: slot.ownerID, slot: slot.id, game: this.state.game, round: slot.round, mode: this.state.settings.mediaMode });
+  }
+
+  private createSlot(round: number, now: number): Slot | null {
+    const ownerID = this.pickOwner(round, []);
+    if (!ownerID) return null;
+    const slot: Slot = { id: this.random.id(), round, ownerID, status: 'requested', requestedAt: now, attempts: 0, readyAt: null, tried: [] };
+    this.state.slots.push(slot);
+    this.requestTurn(slot);
+    return slot;
+  }
+
+  /** The round's owner uploaded its item. Throws 409 when the turn has moved on. */
+  markReady(id: string, slotID: string, kind: MediaKind, now: number): Slot {
     this.require(id);
     const s = this.state;
-    if (s.phase !== 'lobby') throw new GameError(409, 'Add photos and videos in the lobby.');
-    if (!kindAllowed(s.settings.mediaMode, kind))
-      throw new GameError(422, s.settings.mediaMode === 'photos' ? 'The host chose Photos only.' : 'The host chose Videos only.');
-    if (s.items.filter((i) => i.ownerID === id).length >= ITEMS_PER_PLAYER) throw new GameError(409, `You can add up to ${ITEMS_PER_PLAYER} items per game.`);
+    const slot = s.slots.find((sl) => sl.id === slotID);
+    if (!slot || slot.status !== 'requested' || slot.ownerID !== id) throw new GameError(409, 'That turn has already ended.');
+    if (!kindAllowed(s.settings.mediaMode, kind)) throw new GameError(422, `The host chose ${s.settings.mediaMode === 'photos' ? 'Photos' : 'Videos'} only.`);
+    slot.status = 'ready';
+    slot.kind = kind;
+    slot.readyAt = now;
+    this.syncCountdown(slot);
+    s.lastActivityAt = now;
+    return slot;
   }
 
-  addItem(id: string, item: Omit<MediaItem, 'ownerID' | 'uploadedAt' | 'expiresAt'>, now: number): MediaItem {
-    this.assertCanAdd(id, item.kind);
-    const full: MediaItem = { ...item, ownerID: id, uploadedAt: now, expiresAt: now + MEDIA_TTL_MS };
-    this.state.items.push(full);
-    this.state.lastActivityAt = now;
-    return full;
+  private syncCountdown(slot: Slot) {
+    const s = this.state;
+    if (s.phase !== 'countdown' || !s.round || s.round.slotID !== slot.id || slot.readyAt === null) return;
+    s.phaseEndsAt = Math.max(s.round.countdownStart + COUNTDOWN_MS, slot.readyAt + MEDIA_SETTLE_MS);
   }
 
-  removeItem(id: string, itemID: string, now: number) {
-    const p = this.require(id);
-    if (this.state.phase !== 'lobby') throw new GameError(409, 'Remove items in the lobby.');
-    const item = this.state.items.find((i) => i.id === itemID && i.ownerID === id);
-    if (!item) throw new GameError(404, 'That item is already gone.');
-    this.dropItem(item);
-    if (p.ready && !this.eligibleItems(id).length) p.ready = false;
-    this.state.lastActivityAt = now;
+  /** The owner cannot supply an item; ask someone else, or give up on the game. */
+  pass(id: string, slotID: string, now: number) {
+    this.require(id);
+    const slot = this.state.slots.find((sl) => sl.id === slotID);
+    // A pass that arrives after the turn moved on (timeout, reassign) is
+    // harmless; ignore it quietly so nothing reaches the owner's screen.
+    if (!slot || slot.status !== 'requested' || slot.ownerID !== id) return;
+    this.tried(slot, id);
+    this.reassign(slot, now);
   }
 
-  private dropItem(item: MediaItem) {
-    this.state.items = this.state.items.filter((i) => i.id !== item.id);
-    this.deletions.push(item.key);
+  private tried(slot: Slot, id: string) {
+    if (!slot.tried.includes(id)) slot.tried.push(id);
+    slot.attempts = slot.tried.length;
+  }
+
+  private reassign(slot: Slot, now: number) {
+    const ownerID = this.pickOwner(slot.round, slot.tried);
+    if (!ownerID) return this.giveUp(slot, now);
+    slot.ownerID = ownerID;
+    slot.status = 'requested';
+    slot.requestedAt = now;
+    slot.kind = undefined;
+    slot.readyAt = null;
+    const s = this.state;
+    if (s.round?.slotID === slot.id) s.round.ownerID = ownerID;
+    s.lastActivityAt = now;
+    this.requestTurn(slot);
+  }
+
+  private reassignSlotsFor(playerID: string, now: number) {
+    const waiting = this.state.slots.filter((slot) => slot.status === 'requested' && slot.ownerID === playerID);
+    for (const slot of waiting) {
+      if (!this.state.slots.includes(slot)) continue;
+      this.tried(slot, playerID);
+      this.reassign(slot, now);
+    }
+  }
+
+  /**
+   * Nobody eligible is left for this round's item. A round that has not begun
+   * cannot be played, so the game ends now; a round already showing plays out
+   * and the missing next slot ends the game when it would have started.
+   */
+  private giveUp(slot: Slot, now: number) {
+    const s = this.state;
+    s.slots = s.slots.filter((sl) => sl.id !== slot.id);
+    this.freedSlots.push(slot.id);
+    const current = s.round?.slotID === slot.id;
+    if (current || s.phase === 'results') return this.endGame(now);
+    s.lastActivityAt = now;
   }
 
   // ---- game ----
@@ -381,46 +528,35 @@ export class Game {
     const blocker = this.startBlocker();
     if (blocker) throw new GameError(409, blocker);
     const s = this.state;
-    // Items outside the media mode will never be shown; delete them now.
-    for (const item of s.items.filter((i) => !kindAllowed(s.settings.mediaMode, i.kind))) this.dropItem(item);
     for (const p of s.players) Object.assign(p, { score: 0, streak: 0, bestStreak: 0, correctMs: 0, correctCount: 0 });
-    s.shown = {};
+    s.slots = [];
+    s.owned = {};
+    s.lastOwnerID = null;
     s.lastResult = null;
-    s.totalRounds = Math.min(s.settings.rounds, s.items.length);
+    s.totalRounds = s.settings.rounds;
     s.lastActivityAt = now;
+    for (let round = 1; round <= Math.min(s.totalRounds, LOOKAHEAD); round++) this.createSlot(round, now);
     this.beginRound(1, now);
-  }
-
-  /** Server-side pick: the owner shown least so far (random among ties), then a random item of theirs. */
-  private pick(): MediaItem | null {
-    const s = this.state;
-    const owners = s.players.filter((p) => s.items.some((i) => i.ownerID === p.id)).map((p) => p.id);
-    if (!owners.length) return null;
-    const fewest = Math.min(...owners.map((o) => s.shown[o] ?? 0));
-    const pool = owners.filter((o) => (s.shown[o] ?? 0) === fewest);
-    const owner = pool[Math.floor(this.random.float() * pool.length)];
-    const items = s.items.filter((i) => i.ownerID === owner);
-    return items[Math.floor(this.random.float() * items.length)];
   }
 
   private beginRound(index: number, now: number) {
     const s = this.state;
-    const item = this.pick();
-    if (!item || s.players.length < MIN_PLAYERS) return this.endGame(now);
-    s.shown[item.ownerID] = (s.shown[item.ownerID] ?? 0) + 1;
+    if (s.players.length < MIN_PLAYERS) return this.endGame(now);
+    const slot = s.slots.find((sl) => sl.round === index);
+    if (!slot) return this.endGame(now);
     s.round = {
       index,
-      itemID: item.id,
-      ownerID: item.ownerID,
-      kind: item.kind,
-      capability: this.random.id() + this.random.id(),
+      slotID: slot.id,
+      ownerID: slot.ownerID,
+      kind: null,
+      countdownStart: now,
       revealAt: null,
       endsAt: null,
-      guessers: s.players.filter((p) => p.id !== item.ownerID).map((p) => p.id),
+      guessers: [],
       guesses: {},
     };
     s.phase = 'countdown';
-    s.phaseEndsAt = now + COUNTDOWN_MS;
+    s.phaseEndsAt = slot.status === 'ready' && slot.readyAt !== null ? Math.max(now + COUNTDOWN_MS, slot.readyAt + MEDIA_SETTLE_MS) : null;
   }
 
   guess(id: string, targetID: unknown, now: number) {
@@ -428,11 +564,10 @@ export class Game {
     const s = this.state;
     const round = s.round;
     if (s.phase !== 'reveal' || !round || round.revealAt === null || round.endsAt === null) throw new GameError(409, 'There is nothing to guess right now.');
-    if (id === round.ownerID) throw new GameError(409, 'This one is yours. Sit this guess out.');
     if (!round.guessers.includes(id)) throw new GameError(409, 'You joined after this round started.');
     if (round.guesses[id]) throw new GameError(409, 'You already guessed.');
     if (now > round.endsAt) throw new GameError(409, 'Time is up.');
-    if (typeof targetID !== 'string' || targetID === id || !s.players.some((p) => p.id === targetID)) throw new GameError(422, 'Pick another player.');
+    if (typeof targetID !== 'string' || !s.players.some((p) => p.id === targetID)) throw new GameError(422, 'Pick a player.');
     round.guesses[id] = { targetID, elapsedMs: Math.max(0, now - round.revealAt) };
     s.lastActivityAt = now;
     this.finishIfEveryoneGuessed(now);
@@ -454,20 +589,29 @@ export class Game {
       const p = this.player(guesserID);
       if (!p) continue;
       const g = round.guesses[guesserID];
+      // The owner guesses too so nobody can tell whose item it is, but they
+      // always know their own: their guess is a decoy that scores nothing and
+      // leaves their streak alone.
+      if (guesserID === round.ownerID) {
+        rows.push({ playerID: p.id, targetID: g?.targetID ?? null, correct: g?.targetID === round.ownerID, points: 0, accuracy: 0, speed: 0, streakBonus: 0, streak: p.streak, elapsedMs: g?.elapsedMs ?? null, total: p.score, joinSeq: p.joinSeq });
+        continue;
+      }
       const result = scoreGuess({ correct: g?.targetID === round.ownerID, elapsedMs: g?.elapsedMs ?? null, timerMs, previousStreak: p.streak });
       p.score += result.points;
       p.streak = result.streak;
-      p.bestStreak = Math.max(p.bestStreak, p.streak);
+      p.bestStreak = Math.max(p.bestStreak, result.streak);
       if (result.correct) {
         p.correctMs += g!.elapsedMs;
         p.correctCount += 1;
       }
       rows.push({ playerID: p.id, targetID: g?.targetID ?? null, elapsedMs: g?.elapsedMs ?? null, total: p.score, joinSeq: p.joinSeq, ...result });
     }
-    s.lastResult = { index: round.index, ownerID: round.ownerID, kind: round.kind, rows: rankRound(rows).map(({ joinSeq: _, ...row }) => row) };
-    // The round is over: its media is deleted now and its URL stops working.
-    const item = s.items.find((i) => i.id === round.itemID);
-    if (item) this.dropItem(item);
+    s.lastResult = { index: round.index, ownerID: round.ownerID, kind: round.kind ?? 'photo', rows: rankRound(rows).map(({ joinSeq: _, ...row }) => row) };
+    // The round's media is no longer needed: the Durable Object drops the bytes.
+    s.slots = s.slots.filter((sl) => sl.id !== round.slotID);
+    s.owned = { ...(s.owned ?? {}), [round.ownerID]: (s.owned?.[round.ownerID] ?? 0) + 1 };
+    s.lastOwnerID = round.ownerID;
+    this.freedSlots.push(round.slotID);
     s.round = null;
     s.phase = 'results';
     s.phaseEndsAt = now + RESULTS_MS;
@@ -491,8 +635,8 @@ export class Game {
 
   private endGame(now: number) {
     const s = this.state;
-    // Unused media from this game is deleted as soon as it ends.
-    for (const item of [...s.items]) this.dropItem(item);
+    for (const slot of s.slots) this.freedSlots.push(slot.id);
+    s.slots = [];
     s.round = null;
     s.phase = 'podium';
     s.phaseEndsAt = null;
@@ -508,13 +652,14 @@ export class Game {
     s.game += 1;
     s.lastResult = null;
     s.totalRounds = 0;
-    s.shown = {};
+    s.slots = [];
     for (const p of s.players) Object.assign(p, { ready: false, score: 0, streak: 0, bestStreak: 0, correctMs: 0, correctCount: 0 });
     s.lastActivityAt = now;
   }
 
   close() {
-    for (const item of [...this.state.items]) this.dropItem(item);
+    for (const slot of this.state.slots) this.freedSlots.push(slot.id);
+    this.state.slots = [];
     this.state.round = null;
     this.state.phase = 'closed';
     this.state.phaseEndsAt = null;
@@ -522,17 +667,34 @@ export class Game {
 
   // ---- time ----
 
-  /** Applies every transition and cleanup that is due at `now`. */
+  /** Applies every timeout, transition, and cleanup that is due at `now`. */
   tick(now: number) {
     const s = this.state;
+    // Re-pick timeouts are deadlines like any other.
+    for (const slot of [...s.slots].filter((sl) => sl.status === 'requested' && now >= sl.requestedAt + UPLOAD_TIMEOUT_MS)) {
+      if (!s.slots.includes(slot)) continue;
+      this.tried(slot, slot.ownerID);
+      this.reassign(slot, now);
+    }
     for (let guard = 0; guard < 100 && s.phase !== 'closed'; guard++) {
       if (s.phaseEndsAt === null || now < s.phaseEndsAt) break;
       const at = s.phaseEndsAt;
       if (s.phase === 'countdown' && s.round) {
-        s.round.revealAt = at;
-        s.round.endsAt = at + s.settings.timerSeconds * 1000;
+        const round = s.round;
+        const slot = s.slots.find((sl) => sl.id === round.slotID);
+        if (!slot || slot.status !== 'ready') {
+          // Still waiting for the upload; the timeout above will re-pick.
+          s.phaseEndsAt = null;
+          break;
+        }
+        round.kind = slot.kind ?? 'photo';
+        round.revealAt = at;
+        round.endsAt = at + s.settings.timerSeconds * 1000;
+        round.guessers = s.players.filter((p) => p.connected).map((p) => p.id);
         s.phase = 'reveal';
-        s.phaseEndsAt = s.round.endsAt;
+        s.phaseEndsAt = round.endsAt;
+        // One round of lookahead: the next round's item is requested now.
+        if (round.index + 1 <= s.totalRounds && !s.slots.some((sl) => sl.round === round.index + 1)) this.createSlot(round.index + 1, at);
         this.finishIfEveryoneGuessed(at);
       } else if (s.phase === 'reveal' && s.round) {
         this.finishRound(at);
@@ -545,7 +707,6 @@ export class Game {
     if (s.phase === 'closed') return;
     for (const p of [...s.players]) if (!p.connected && p.disconnectedAt !== null && now >= p.disconnectedAt + DISCONNECT_GRACE_MS) this.leave(p.id, now);
     if ((s.phase as Phase) === 'closed') return;
-    for (const item of s.items.filter((i) => now >= i.expiresAt && i.id !== s.round?.itemID)) this.dropItem(item);
     if (s.emptySince !== null && now >= s.emptySince + EMPTY_ROOM_GRACE_MS) return this.close();
     const idle = this.idleDeadline();
     if (idle !== null && now >= idle) this.close();
@@ -567,18 +728,17 @@ export class Game {
       s.emptySince === null ? null : s.emptySince + EMPTY_ROOM_GRACE_MS,
       this.idleDeadline(),
       ...s.players.map((p) => (p.connected || p.disconnectedAt === null ? null : p.disconnectedAt + DISCONNECT_GRACE_MS)),
-      ...s.items.map((i) => i.expiresAt),
+      ...s.slots.filter((slot) => slot.status === 'requested').map((slot) => slot.requestedAt + UPLOAD_TIMEOUT_MS),
     ].filter((t): t is number => t !== null);
     return times.length ? Math.min(...times) : null;
   }
 
   // ---- views ----
 
-  /** What one player is allowed to see. Never includes the owner before results, other players' guesses, or storage keys. */
-  view(viewerID: string, now: number, mediaPath: (capability: string) => string) {
+  /** What one player is allowed to see. Never includes slots, owner ids before results, or other players' guesses. */
+  view(viewerID: string, now: number) {
     const s = this.state;
     const round = s.round;
-    const counts = (id: string, kind: MediaKind) => s.items.filter((i) => i.ownerID === id && i.kind === kind).length;
     const ranked = s.phase === 'podium' ? rankFinal(s.players) : [];
     return {
       code: s.code,
@@ -589,7 +749,7 @@ export class Game {
       settings: s.settings,
       serverNow: now,
       phaseEndsAt: s.phaseEndsAt,
-      startBlocker: s.phase === 'lobby' ? this.startBlocker() : null,
+      startBlocker: s.phase === 'lobby' ? this.startBlocker(viewerID) : null,
       players: [...s.players]
         .sort((a, b) => a.joinSeq - b.joinSeq)
         .map((p) => ({
@@ -601,35 +761,27 @@ export class Game {
           connected: p.connected,
           score: p.score,
           streak: p.streak,
-          photos: counts(p.id, 'photo'),
-          videos: counts(p.id, 'video'),
+          deck: { photos: p.deck.photos, videos: p.deck.videos },
         })),
-      you: {
-        id: viewerID,
-        items: s.items.filter((i) => i.ownerID === viewerID).map((i) => ({ id: i.id, kind: i.kind, durationMs: i.durationMs ?? null })),
-      },
+      you: { id: viewerID },
       round:
-        round && (s.phase === 'countdown' || s.phase === 'reveal')
-          ? {
-              index: round.index,
-              total: s.totalRounds,
-              ...(s.phase === 'reveal'
-                ? {
-                    kind: round.kind,
-                    mediaPath: mediaPath(round.capability),
-                    revealAt: round.revealAt,
-                    endsAt: round.endsAt,
-                    canGuess: round.guessers.includes(viewerID) && viewerID !== round.ownerID,
-                    isYours: viewerID === round.ownerID,
-                    yourGuess: round.guesses[viewerID]?.targetID ?? null,
-                    guessedCount: Object.keys(round.guesses).length,
-                    guesserCount: round.guessers.length,
-                  }
-                : {}),
-            }
-          : s.phase === 'results' || s.phase === 'podium'
-            ? { index: s.lastResult?.index ?? 0, total: s.totalRounds }
-            : null,
+        round && s.phase === 'countdown'
+          ? { index: round.index, total: s.totalRounds, waiting: s.phaseEndsAt === null }
+          : round && s.phase === 'reveal'
+            ? {
+                index: round.index,
+                total: s.totalRounds,
+                kind: round.kind,
+                revealAt: round.revealAt,
+                endsAt: round.endsAt,
+                canGuess: round.guessers.includes(viewerID) && !round.guesses[viewerID],
+                yourGuess: round.guesses[viewerID]?.targetID ?? null,
+                guessedCount: Object.keys(round.guesses).length,
+                guesserCount: round.guessers.length,
+              }
+            : s.phase === 'results' || s.phase === 'podium'
+              ? { index: s.lastResult?.index ?? 0, total: s.totalRounds }
+              : null,
       lastResult: s.phase === 'results' || s.phase === 'podium' ? s.lastResult : null,
       podium: ranked.map((p, i) => ({ playerID: p.id, rank: i + 1, score: p.score, bestStreak: p.bestStreak, correctCount: p.correctCount })),
     };

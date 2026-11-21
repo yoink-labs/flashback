@@ -1,6 +1,5 @@
 import AVFoundation
-import Photos
-import PhotosUI
+import Foundation
 import SwiftUI
 import UIKit
 
@@ -24,6 +23,11 @@ import UIKit
         player.play()
     }
 
+    /// Keeps the last frame visible (used on the results screen).
+    func pause() {
+        player?.pause()
+    }
+
     func stop() {
         player?.pause()
         looper?.disableLooping()
@@ -37,46 +41,74 @@ import UIKit
 
 enum Connection: Equatable { case idle, connecting, open, reconnecting, closed(String) }
 
-struct UploadStatus: Identifiable, Equatable {
-    let id = UUID()
-    var label: String
-    var state: String
-    var failed = false
-}
-
 /// All room state for the app: session, server view, connection, reveal media,
-/// uploads, and form drafts. Views are pure functions of this store.
+/// the player's deck, and prepared uploads. Views are pure functions of this store.
 @MainActor final class RoomStore: ObservableObject {
     @Published private(set) var session: RoomSession?
     @Published private(set) var view: RoomView?
     @Published private(set) var connection: Connection = .idle
     @Published var error: String?
     @Published var busy = false
-    @Published var uploads: [UploadStatus] = []
     @Published var revealImage: UIImage?
     @Published var revealFailed = false
     @Published var draftCode = ""
     @Published var draftNickname = ""
     @Published var showJoin = false
+    @Published var roomInfo: RoomInfo?
+    @Published var previewLoading = false
+    @Published var previewError: String?
+
+    let deck: DeckStore
     let playback = PlaybackController()
 
     var api: APIClient
     let vault: SessionVault
+
     private var socket: URLSessionWebSocketTask?
     private var receiver: Task<Void, Never>?
     private var pinger: Task<Void, Never>?
     private var attempt = 0
     private var clockOffset: Double = 0
-    private var revealPath: String?
 
-    init(api: APIClient = APIClient(base: APIClient.defaultBase), vault: SessionVault = KeychainVault()) {
+    /// Binary media keyed by (game, round), exactly as the server pushes it.
+    private var media: [MediaKey: MediaBlob] = [:]
+    private var needMediaSent: Set<MediaKey> = []
+    private var showingKey: MediaKey?
+
+    /// One processed item held ready. The turn upload uses it instantly.
+    private var prepared: PreparedItem?
+    private var work: Task<Void, Never>?
+    private var lastSentDeck: DeckCount?
+
+    static let muteDefaultsKey = "flashback.revealMuted"
+
+    struct TurnRequest: Equatable {
+        var slot: String
+        var game: Int
+        var round: Int
+        var mode: MediaMode
+    }
+
+    init(
+        api: APIClient = APIClient(base: APIClient.defaultBase),
+        vault: SessionVault = KeychainVault(),
+        deck: DeckStore? = nil
+    ) {
         self.api = api
         self.vault = vault
+        self.deck = deck ?? DeckStore()
+        self.playback.muted = UserDefaults.standard.object(forKey: Self.muteDefaultsKey) as? Bool ?? true
+        self.deck.onChange = { [weak self] in self?.sendDeckIfNeeded() }
     }
 
     var serverNow: Double { Date().timeIntervalSince1970 * 1000 + clockOffset }
 
-    // ---- entering a room ----
+    func setMuted(_ muted: Bool) {
+        playback.muted = muted
+        UserDefaults.standard.set(muted, forKey: Self.muteDefaultsKey)
+    }
+
+    // MARK: - Entering a room
 
     func resume() {
         guard session == nil, let saved = vault.resumable() else { return }
@@ -93,7 +125,8 @@ struct UploadStatus: Identifiable, Equatable {
 
     private func run(_ action: @escaping () async throws -> RoomSession) async {
         guard !busy else { return }
-        busy = true; error = nil
+        busy = true
+        error = nil
         defer { busy = false }
         do { enter(try await action()) } catch { self.error = error.localizedDescription }
     }
@@ -101,8 +134,17 @@ struct UploadStatus: Identifiable, Equatable {
     func enter(_ session: RoomSession) {
         vault.save(session)
         self.session = session
+        view = nil
+        error = nil
         showJoin = false
         attempt = 0
+        prepared = nil
+        lastSentDeck = nil
+        media.removeAll()
+        needMediaSent.removeAll()
+        roomInfo = nil
+        previewError = nil
+        deck.resetUsed()
         connect()
     }
 
@@ -132,40 +174,96 @@ struct UploadStatus: Identifiable, Equatable {
         if let code = session?.code { vault.remove(code: code) }
         disconnect()
         clearReveal()
+        media.removeAll()
+        needMediaSent.removeAll()
+        prepared = nil
+        lastSentDeck = nil
         connection = .closed(reason)
     }
 
-    // ---- WebSocket ----
+    // MARK: - Room preview
+
+    /// Looks up a room before joining so the join screen can show host, mode,
+    /// rounds, and how full it is.
+    func preview(code: String) async {
+        guard let normalized = RoomCode.normalize(code) else {
+            roomInfo = nil
+            previewError = nil
+            previewLoading = false
+            return
+        }
+        previewLoading = true
+        previewError = nil
+        do {
+            let info = try await api.roomInfo(code: normalized)
+            guard !Task.isCancelled else { return }
+            roomInfo = info
+            previewLoading = false
+        } catch let error as APIError {
+            guard !Task.isCancelled else { return }
+            roomInfo = nil
+            previewError = error.status == 404 ? "No room with that code" : error.message
+            previewLoading = false
+        } catch {
+            guard !Task.isCancelled else { return }
+            roomInfo = nil
+            previewError = error.localizedDescription
+            previewLoading = false
+        }
+    }
+
+    func clearPreview() {
+        roomInfo = nil
+        previewError = nil
+        previewLoading = false
+    }
+
+    // MARK: - WebSocket
 
     func connect() {
         guard let session else { return }
         disconnect()
         connection = attempt == 0 ? .connecting : .reconnecting
-        let task = api.urlSession.webSocketTask(with: api.webSocketURL(code: session.code), protocols: ["flashback.v1", "auth.\(session.token)"])
+        let task = api.urlSession.webSocketTask(with: api.webSocketURL(code: session.code), protocols: ["flashback.v2", "auth.\(session.token)"])
+        // The default 1 MB drops clips; a 16 MB ceiling covers an 8 MB MP4 frame.
+        task.maximumMessageSize = MediaFrame.maxBytes
         socket = task
         task.resume()
         receiver = Task { [weak self] in await self?.receive(task) }
         pinger = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(25))
+                try? await Task.sleep(for: .seconds(30))
                 self?.send(.ping)
             }
         }
     }
 
     private func disconnect() {
-        receiver?.cancel(); pinger?.cancel()
+        receiver?.cancel()
+        pinger?.cancel()
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil
+        lastSentDeck = nil
     }
 
     private func receive(_ task: URLSessionWebSocketTask) async {
         do {
             while !Task.isCancelled {
                 let message = try await task.receive()
-                guard case .string(let text) = message, let data = text.data(using: .utf8) else { continue }
-                if connection != .open { connection = .open; attempt = 0 }
-                handle(try JSONDecoder().decode(ServerMessage.self, from: data))
+                if connection != .open {
+                    connection = .open
+                    attempt = 0
+                }
+                switch message {
+                case .string(let text):
+                    guard let data = text.data(using: .utf8),
+                          let decoded = try? JSONDecoder().decode(ServerMessage.self, from: data) else { continue }
+                    handle(decoded)
+                case .data(let data):
+                    handleMedia(data)
+                default:
+                    break
+                }
             }
         } catch {
             guard !Task.isCancelled, socket === task, session != nil else { return }
@@ -173,7 +271,9 @@ struct UploadStatus: Identifiable, Equatable {
             attempt += 1
             connection = .reconnecting
             if attempt >= 3, let code = session?.code {
-                do { _ = try await api.roomInfo(code: code) } catch let e as APIError where e.status == 404 { return finish(reason: "room-closed") } catch {}
+                do { _ = try await api.roomInfo(code: code) }
+                catch let error as APIError where error.status == 404 { return finish(reason: "room-closed") }
+                catch {}
             }
             if attempt >= 8 { return finish(reason: "lost") }
             try? await Task.sleep(for: .milliseconds(min(8000, 400 * (1 << attempt))))
@@ -181,21 +281,40 @@ struct UploadStatus: Identifiable, Equatable {
         }
     }
 
-    /// Applies one server message. Internal so tests can drive the store without a socket.
+    /// Applies one text message. Internal so tests can drive the store without a socket.
     func handle(_ message: ServerMessage) {
         switch message.type {
         case "state":
             guard let state = message.state else { return }
             clockOffset = state.serverNow - Date().timeIntervalSince1970 * 1000
             apply(state)
-        case "error": error = message.message
+        case "error":
+            // Errors from background messages (turn passes, deck counts, media
+            // re-requests) must never show: only the round's owner could get them.
+            if !["pass", "deck", "needMedia"].contains(message.request ?? "") { error = message.message }
         case "session":
             guard var session, let token = message.token, let expiresAt = message.expiresAt else { return }
-            session.token = token; session.expiresAt = expiresAt
+            session.token = token
+            session.expiresAt = expiresAt
             self.session = session
             vault.save(session)
-        case "closed": finish(reason: message.reason ?? "room-closed")
-        default: break
+        case "turn":
+            guard let slot = message.slot, let game = message.game, let round = message.round, let mode = message.mode else { return }
+            beginTurn(TurnRequest(slot: slot, game: game, round: round, mode: mode))
+        case "closed":
+            finish(reason: message.reason ?? "room-closed")
+        default:
+            break
+        }
+    }
+
+    /// Applies a binary media frame. Internal so tests can drive it.
+    func handleMedia(_ data: Data) {
+        guard let frame = MediaFrame.parse(data) else { return }
+        let key = MediaKey(game: frame.header.game, round: frame.header.round)
+        media[key] = MediaBlob(kind: frame.header.kind, bytes: frame.bytes)
+        if let view, view.phase == .reveal, view.game == key.game, view.round?.index == key.round {
+            showReveal(key, kind: frame.header.kind)
         }
     }
 
@@ -203,24 +322,54 @@ struct UploadStatus: Identifiable, Equatable {
         let old = view
         view = state
         haptics(from: old, to: state)
-        if state.phase == .reveal, let path = state.round?.mediaPath, let kind = state.round?.kind {
-            if path != revealPath { loadReveal(path: path, kind: kind) }
-        } else if revealPath != nil {
-            // The round ended: drop the media from memory and disk right away.
+        sendDeckIfNeeded(force: lastSentDeck == nil)
+
+        switch state.phase {
+        case .reveal:
+            if let round = state.round {
+                showReveal(MediaKey(game: state.game, round: round.index), kind: round.kind)
+            }
+        case .results:
+            // Keep the last frame and the photo for the small results thumbnail,
+            // and free every older round's bytes.
+            playback.pause()
+            if let ended = state.lastResult?.index {
+                media = media.filter { $0.key.round > ended }
+            }
+        default:
             clearReveal()
+            if state.phase == .lobby || state.phase == .podium {
+                media.removeAll()
+                needMediaSent.removeAll()
+            }
+        }
+
+        // Keep a prepared item warm; drop it only when it is no longer valid for
+        // the room (unready, mode change, deck change).
+        if state.phase == .lobby, state.me?.ready != true {
+            prepared = nil
+        }
+        if let current = prepared {
+            let stillInDeck = deck.item(current.itemID) != nil
+            if !stillInDeck || !MediaConstraints.allows(state.settings.mediaMode, current.kind) {
+                prepared = nil
+            }
+        }
+        if state.phase == .lobby, state.me?.ready == true {
+            prepareNext()
         }
     }
 
     private func haptics(from old: RoomView?, to new: RoomView) {
-        guard old?.phase != new.phase || old?.round?.index != new.round?.index else {
-            if old?.me?.ready == false && new.me?.ready == true { Haptics.ready() }
-            return
-        }
+        if old?.me?.ready == false && new.me?.ready == true { Haptics.ready() }
+        guard old?.phase != new.phase || old?.round?.index != new.round?.index else { return }
         switch new.phase {
         case .countdown: Haptics.tick()
         case .reveal: Haptics.reveal()
         case .results:
-            if let row = new.lastResult?.rows.first(where: { $0.playerID == new.you.id }) { row.correct ? Haptics.correct() : Haptics.incorrect() }
+            if let row = new.lastResult?.rows.first(where: { $0.playerID == new.you.id }) {
+                if row.correct { Haptics.correct() } else { Haptics.incorrect() }
+            }
         case .podium: Haptics.podium()
         default: break
         }
@@ -228,114 +377,173 @@ struct UploadStatus: Identifiable, Equatable {
 
     func send(_ message: ClientMessage) {
         guard let socket, let data = try? JSONEncoder().encode(message), let text = String(data: data, encoding: .utf8) else { return }
-        if case .ping = message {} else { error = nil }
+        let isPing = message.isPing
+        if !isPing { error = nil }
         socket.send(.string(text)) { [weak self] failure in
-            if failure != nil, case .ping = message {} else if failure != nil { Task { @MainActor in self?.error = "Reconnecting… try again in a moment." } }
+            guard failure != nil, !isPing else { return }
+            Task { @MainActor in self?.error = "Reconnecting… try again in a moment." }
         }
     }
 
-    // ---- reveal media ----
+    func setReady(_ ready: Bool) {
+        send(.ready(ready))
+        if ready { prepareNext() }
+    }
 
-    private func loadReveal(path: String, kind: MediaKind) {
-        clearReveal()
-        revealPath = path
-        guard let session else { return }
-        Task {
+    // MARK: - Deck counts
+
+    private func sendDeckIfNeeded(force: Bool = false) {
+        guard socket != nil, let view else { return }
+        let counts = deck.counts(mode: view.settings.mediaMode)
+        guard force || counts != lastSentDeck else { return }
+        lastSentDeck = counts
+        send(.deck(counts))
+    }
+
+    // MARK: - Turn uploads (silent: nothing in the UI hints whose turn it is)
+
+    /// Queued in order: the server can ask for two slots at once (lookahead 2),
+    /// and each one must get exactly one answer.
+    private func beginTurn(_ turn: TurnRequest) {
+        enqueue { [weak self] in
+            guard let self, self.session != nil else { return }
+            await self.serve(turn)
+        }
+    }
+
+    /// Runs preparation and uploads one at a time so a turn never races a prep.
+    private func enqueue(_ operation: @escaping @MainActor () async -> Void) {
+        let previous = work
+        work = Task { @MainActor in
+            if let previous { await previous.value }
+            await operation()
+        }
+    }
+
+    private func prepareNext() {
+        guard prepared == nil, let view, session != nil else { return }
+        guard view.phase != .lobby || view.me?.ready == true else { return }
+        let mode = view.settings.mediaMode
+        enqueue { [weak self] in
+            guard let self, self.session != nil, self.prepared == nil else { return }
+            self.prepared = await self.processNext(mode: mode)
+        }
+    }
+
+    private func processNext(mode: MediaMode) async -> PreparedItem? {
+        var attempts = 0
+        while attempts < 6 {
+            attempts += 1
+            guard let item = deck.randomCandidate(mode: mode) else { return nil }
             do {
-                let data = try await api.media(path: path, session: session)
-                guard revealPath == path else { return }
-                if kind == .photo { revealImage = UIImage(data: data) }
-                else {
-                    let url = FileManager.default.temporaryDirectory.appendingPathComponent("reveal-\(UUID().uuidString).mp4")
-                    try data.write(to: url, options: .completeFileProtection)
-                    playback.play(file: url)
-                }
-            } catch { if revealPath == path { revealFailed = true } }
+                return try await deck.prepare(item)
+            } catch {
+                // A bad item is burned so the next attempt makes progress.
+                deck.markUsed(item.id)
+            }
+        }
+        return nil
+    }
+
+    private func currentPrepared(mode: MediaMode) -> PreparedItem? {
+        guard let prepared else { return nil }
+        guard let item = deck.item(prepared.itemID),
+              !deck.isHidden(item.id),
+              MediaConstraints.allows(mode, prepared.kind) else {
+            self.prepared = nil
+            return nil
+        }
+        return prepared
+    }
+
+    private func serve(_ turn: TurnRequest) async {
+        guard let session else {
+            send(.pass(turn.slot))
+            return
+        }
+
+        var uploaded = false
+        var shouldPass = true
+        var attempts = 0
+        while attempts < 3 && !uploaded {
+            attempts += 1
+            let item: PreparedItem?
+            if let ready = currentPrepared(mode: turn.mode) {
+                item = ready
+            } else {
+                item = await processNext(mode: turn.mode)
+            }
+            guard let item else { break }
+            prepared = nil
+            do {
+                try await api.upload(item.data, kind: item.kind, slot: turn.slot, session: session)
+                // The owner keeps its own copy under the same (game, round) key.
+                media[MediaKey(game: turn.game, round: turn.round)] = MediaBlob(kind: item.kind, bytes: item.data)
+                deck.markUsed(item.itemID)
+                uploaded = true
+            } catch let error as APIError where error.status == 409 {
+                // The slot was already answered, reassigned, or timed out.
+                // Passing for it would be wrong, so stop quietly.
+                shouldPass = false
+                break
+            } catch {
+                deck.markUsed(item.itemID)
+            }
+        }
+
+        if !uploaded && shouldPass { send(.pass(turn.slot)) }
+        prepareNext()
+    }
+
+    // MARK: - Reveal media
+
+    private var hasMedia: Bool { revealImage != nil || playback.player != nil }
+
+    private func showReveal(_ key: MediaKey, kind: MediaKind?) {
+        if showingKey == key {
+            if let blob = media[key], !hasMedia { present(blob) }
+            return
+        }
+        clearReveal()
+        showingKey = key
+        if let blob = media[key] {
+            present(blob)
+            return
+        }
+        // Ask once. If the Durable Object lost the bytes, say so plainly.
+        if needMediaSent.insert(key).inserted { send(.needMedia(key.round)) }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(2200))
+            guard let self, self.showingKey == key, !self.hasMedia else { return }
+            self.revealFailed = true
+        }
+    }
+
+    private func present(_ blob: MediaBlob) {
+        revealFailed = false
+        switch blob.kind {
+        case .photo:
+            guard let image = UIImage(data: blob.bytes) else {
+                revealFailed = true
+                return
+            }
+            revealImage = image
+        case .video:
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("reveal-\(UUID().uuidString).mp4")
+            do {
+                try blob.bytes.write(to: url, options: .completeFileProtection)
+            } catch {
+                revealFailed = true
+                return
+            }
+            playback.play(file: url)
         }
     }
 
     private func clearReveal() {
-        revealPath = nil
+        showingKey = nil
         revealImage = nil
         revealFailed = false
         playback.stop()
-    }
-
-    // ---- adding media ----
-
-    private var slots: Int { MediaConstraints.slots(used: view?.you.items.count ?? 0) }
-
-    /// "Pick for me": random photos and/or videos from the library via PhotoKit.
-    func addRandom() async {
-        guard let mode = view?.settings.mediaMode else { return }
-        let access = await MediaLibrary.requestAccess()
-        guard access != .denied else { error = MediaError.noAccess.localizedDescription; return }
-        let assets = MediaLibrary.randomAssets(mode: mode, count: min(slots, MediaConstraints.randomBatch))
-        guard !assets.isEmpty else { error = MediaError.nothingFound(mode).localizedDescription; return }
-        await process(assets.map { asset in
-            (asset.mediaType == .video ? MediaKind.video : .photo, { () async throws -> Prepared in
-                asset.mediaType == .video ? .file(try await MediaProcessor.clip(from: try await MediaProcessor.avAsset(from: asset))) : .data(try await MediaProcessor.photo(from: asset))
-            })
-        })
-    }
-
-    /// Items the player chose with the system photo picker (no library permission needed).
-    func add(picked items: [PhotosPickerItem]) async {
-        await process(items.prefix(slots).map { item in
-            let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
-            return (isVideo ? MediaKind.video : .photo, { () async throws -> Prepared in
-                if isVideo {
-                    guard let movie = try await item.loadTransferable(type: PickedMovie.self) else { throw MediaError.unreadable }
-                    defer { try? FileManager.default.removeItem(at: movie.url) }
-                    return .file(try await MediaProcessor.clip(from: AVURLAsset(url: movie.url)))
-                }
-                guard let data = try await item.loadTransferable(type: Data.self) else { throw MediaError.unreadable }
-                return .data(try MediaProcessor.compressPhoto(data))
-            })
-        })
-    }
-
-    enum Prepared { case data(Data), file(URL) }
-
-    private func process(_ jobs: [(MediaKind, () async throws -> Prepared)]) async {
-        guard let mode = view?.settings.mediaMode else { return }
-        uploads = jobs.enumerated().map { UploadStatus(label: $0.element.0 == .photo ? "Photo \($0.offset + 1)" : "Video \($0.offset + 1)", state: "Waiting…") }
-        for (index, job) in jobs.enumerated() {
-            let (kind, prepare) = job
-            do {
-                guard MediaConstraints.allows(mode, kind) else { throw MediaError.notAllowed(mode) }
-                uploads[index].state = kind == .photo ? "Compressing…" : "Making a short clip…"
-                let prepared = try await prepare()
-                let data: Data
-                switch prepared {
-                case .data(let d): data = d
-                case .file(let url):
-                    defer { try? FileManager.default.removeItem(at: url) }
-                    data = try Data(contentsOf: url)
-                }
-                try MediaConstraints.validate(bytes: data.count, kind: kind)
-                uploads[index].state = "Uploading…"
-                guard let session else { return }
-                try await api.upload(data, kind: kind, session: session)
-                uploads[index].state = "Added"
-            } catch {
-                uploads[index].state = error.localizedDescription
-                uploads[index].failed = true
-            }
-        }
-        try? await Task.sleep(for: .seconds(2))
-        uploads.removeAll { !$0.failed }
-    }
-}
-
-/// A picked movie copied to a temporary file we own (and delete).
-struct PickedMovie: Transferable {
-    let url: URL
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie) { SentTransferredFile($0.url) } importing: { received in
-            let copy = FileManager.default.temporaryDirectory.appendingPathComponent("picked-\(UUID().uuidString).\(received.file.pathExtension)")
-            try FileManager.default.copyItem(at: received.file, to: copy)
-            return Self(url: copy)
-        }
     }
 }

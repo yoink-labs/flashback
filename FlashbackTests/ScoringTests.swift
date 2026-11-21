@@ -45,6 +45,37 @@ final class ScoringTests: XCTestCase {
         XCTAssertEqual(Scoring.rankRound(rows).map(\.id), ["f", "b", "a", "c", "e", "d"])
     }
 
+    func testStandingsMovementAfterARound() {
+        let players = [
+            PlayerView(id: "a", nickname: "A", score: 1500),
+            PlayerView(id: "b", nickname: "B", score: 1000),
+            PlayerView(id: "c", nickname: "C", score: 1200),
+        ]
+        let rows = [
+            ResultRow(playerID: "a", targetID: "c", correct: true, points: 500, accuracy: 500, speed: 0, streakBonus: 0, streak: 1, elapsedMs: 0, total: 1500),
+            ResultRow(playerID: "b", targetID: "a", correct: false, points: 0, accuracy: 0, speed: 0, streakBonus: 0, streak: 0, elapsedMs: nil, total: 1000),
+            ResultRow(playerID: "c", targetID: "a", correct: false, points: 0, accuracy: 0, speed: 0, streakBonus: 0, streak: 0, elapsedMs: nil, total: 1200),
+        ]
+        let standings = Scoring.Standings.rows(
+            players: players,
+            result: RoundResult(index: 1, ownerID: "a", kind: .photo, rows: rows)
+        )
+        XCTAssertEqual(standings.map(\.id), ["a", "c", "b"])
+        XCTAssertEqual(standings.map(\.rank), [1, 2, 3])
+        XCTAssertEqual(standings.map(\.previous), [1000, 1200, 1000])
+        XCTAssertEqual(standings.map(\.movement), [1, -1, 0])
+    }
+
+    func testStandingsWithoutResultsAreUnchanged() {
+        let players = [
+            PlayerView(id: "a", nickname: "A", score: 900),
+            PlayerView(id: "b", nickname: "B", score: 1200),
+        ]
+        let standings = Scoring.Standings.rows(players: players, result: nil)
+        XCTAssertEqual(standings.map(\.id), ["b", "a"])
+        XCTAssertEqual(standings.map(\.movement), [0, 0])
+    }
+
     func testPodiumTieBreaks() {
         let rows: [Scoring.FinalRow] = [
             .init(id: "late", score: 1500, correctMs: 9000, joinSeq: 1),

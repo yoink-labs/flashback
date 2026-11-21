@@ -6,12 +6,18 @@ struct APIError: LocalizedError, Equatable {
     var errorDescription: String? { message }
 }
 
+/// `GET /v1/rooms/:code` — enough to preview a room before joining.
 struct RoomInfo: Codable, Equatable {
     var code: String
     var phase: String
     var players: Int
     var capacity: Int
     var joinable: Bool
+    var host: String?
+    var settings: RoomSettings?
+
+    var modeSummary: String { settings?.mediaMode.summary ?? "Photos & videos" }
+    var rounds: Int { settings?.rounds ?? 10 }
 }
 
 /// HTTP calls to the Flashback Worker. Guests send no Authorization header when
@@ -30,13 +36,34 @@ struct APIClient {
         return URL(string: "https://\(RoomCode.webHost)")!
     }
 
-    private func send<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil, contentType: String? = nil, bearer: String? = nil) async throws -> T {
-        var request = URLRequest(url: base.appending(path: path))
+    private func makeRequest(
+        _ path: String,
+        method: String,
+        body: Data?,
+        contentType: String?,
+        bearer: String?,
+        query: [URLQueryItem]
+    ) -> URLRequest {
+        var components = URLComponents(url: base.appending(path: path), resolvingAgainstBaseURL: false)
+        if !query.isEmpty { components?.queryItems = query }
+        var request = URLRequest(url: components?.url ?? base)
         request.httpMethod = method
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpBody = body
         if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
+        return request
+    }
+
+    private func perform(
+        _ path: String,
+        method: String = "GET",
+        body: Data? = nil,
+        contentType: String? = nil,
+        bearer: String? = nil,
+        query: [URLQueryItem] = []
+    ) async throws -> Data {
+        let request = makeRequest(path, method: method, body: body, contentType: contentType, bearer: bearer, query: query)
         let data: Data, response: URLResponse
         do { (data, response) = try await urlSession.data(for: request) }
         catch { throw APIError(status: 0, message: "Couldn't reach Flashback. Check your connection.") }
@@ -45,7 +72,17 @@ struct APIClient {
             let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"] ?? "Something went wrong. Try again."
             throw APIError(status: status, message: message)
         }
-        if T.self == Data.self { return data as! T }
+        return data
+    }
+
+    private func send<T: Decodable>(
+        _ path: String,
+        method: String = "GET",
+        body: Data? = nil,
+        contentType: String? = nil,
+        bearer: String? = nil
+    ) async throws -> T {
+        let data = try await perform(path, method: method, body: body, contentType: contentType, bearer: bearer)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
@@ -57,20 +94,25 @@ struct APIClient {
         try await send("v1/rooms/\(code)/join", method: "POST", body: try JSONEncoder().encode(["nickname": nickname]), contentType: "application/json", bearer: clerkToken)
     }
 
-    func roomInfo(code: String) async throws -> RoomInfo { try await send("v1/rooms/\(code)") }
-
-    func upload(_ data: Data, kind: MediaKind, session: RoomSession) async throws {
-        struct Created: Decodable {}
-        let _: Created = try await send("v1/rooms/\(session.code)/media", method: "POST", body: data, contentType: kind == .photo ? "image/jpeg" : "video/mp4", bearer: session.token)
+    func roomInfo(code: String) async throws -> RoomInfo {
+        try await send("v1/rooms/\(code)")
     }
 
-    func media(path: String, session: RoomSession) async throws -> Data {
-        try await send(String(path.drop(while: { $0 == "/" })), bearer: session.token)
+    /// The owner's turn upload: one item for one slot, as JPEG or MP4 bytes.
+    /// The worker answers with an empty or JSON body; neither is decoded.
+    func upload(_ data: Data, kind: MediaKind, slot: String, session: RoomSession) async throws {
+        _ = try await perform(
+            "v1/rooms/\(session.code)/media",
+            method: "POST",
+            body: data,
+            contentType: kind == .photo ? "image/jpeg" : "video/mp4",
+            bearer: session.token,
+            query: [URLQueryItem(name: "slot", value: slot)]
+        )
     }
 
     func leave(session: RoomSession) async {
-        struct OK: Decodable {}
-        let _: OK? = try? await send("v1/rooms/\(session.code)/leave", method: "POST", bearer: session.token)
+        _ = try? await perform("v1/rooms/\(session.code)/leave", method: "POST", bearer: session.token)
     }
 
     func webSocketURL(code: String) -> URL {

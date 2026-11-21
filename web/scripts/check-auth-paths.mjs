@@ -25,7 +25,7 @@ const checks = [
   ['Clerk sign-out is available', clerk.includes('signOut()') && entry.includes('signOut()')],
   ['Players can choose guest play even when signed in', entry.includes('Play as a guest instead')],
   ['Room sessions are stored for reconnects', api.includes('localStorage.setItem')],
-  ['WebSocket authenticates with the room session subprotocol', room.includes("['flashback.v1', `auth.${token.current}`]")],
+  ['WebSocket authenticates with the room session subprotocol', room.includes("['flashback.v2', `auth.${token.current}`]")],
   ['No @clerk/clerk-react dependency', !read('package.json').includes('@clerk/clerk-react')],
 ];
 

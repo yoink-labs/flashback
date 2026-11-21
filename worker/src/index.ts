@@ -1,16 +1,17 @@
 // Flashback Worker: HTTP API, WebSocket routing, and the web app's static assets.
 //
 //   POST   /v1/rooms                       create a room (guest or Clerk), returns a room session
-//   GET    /v1/rooms/:code                 public room preview (phase, player count)
+//   GET    /v1/rooms/:code                 public room preview (host, players, settings)
 //   POST   /v1/rooms/:code/join            join with a nickname (guest or Clerk), returns a room session
-//   GET    /v1/rooms/:code/ws              WebSocket (auth: Sec-WebSocket-Protocol "auth.<token>" or Bearer)
-//   POST   /v1/rooms/:code/media           upload one JPEG or MP4 clip (lobby only)
-//   DELETE /v1/rooms/:code/media/:id       remove one of your items (lobby only)
-//   GET    /v1/rooms/:code/media/:cap      the current round's media, during the reveal only
-//   POST   /v1/rooms/:code/leave           leave the room (your unused media is deleted)
+//   GET    /v1/rooms/:code/ws              WebSocket (auth: Sec-WebSocket-Protocol "flashback.v2, auth.<token>" or Bearer)
+//   POST   /v1/rooms/:code/media?slot=<id> upload the item for one `turn` (the slot's owner only)
+//   POST   /v1/rooms/:code/leave           leave the room
 //
-// Every authenticated route accepts either a Clerk session token (RS256, verified
-// here) or a room session token (HS256, verified by the room's Durable Object).
+// Media never touches storage: the room Durable Object holds the one item for an
+// open slot in memory and pushes it to the other players as a binary WebSocket
+// frame. Every authenticated route accepts either a Clerk session token (RS256,
+// verified here) or a room session token (HS256, verified by the room's Durable
+// Object).
 import { verifyClerk } from './clerk';
 import { generateCode, joinURL, normalizeCode } from './codes';
 import { tokenKind } from './session';
@@ -123,19 +124,18 @@ export async function route(request: Request, env: Env): Promise<Response> {
     headers.set(IDENTITY_HEADER, JSON.stringify(identity));
     headers.delete('Authorization');
     const offered = request.headers.get('Sec-WebSocket-Protocol')?.split(',').map((p) => p.trim()) ?? [];
-    if (offered.length) headers.set('Sec-WebSocket-Protocol', offered.filter((p) => p === WS_PROTOCOL).join(', '));
+    const accepted = offered.filter((p) => p === WS_PROTOCOL);
+    if (accepted.length) headers.set('Sec-WebSocket-Protocol', accepted.join(', '));
     return roomStub(env, code).fetch(new Request('https://room/ws', { method: 'GET', headers }));
   }
   if (action === 'media' && request.method === 'POST' && !arg) {
+    const slot = url.searchParams.get('slot');
+    if (!slot) throw new HTTPError(400, 'Which turn?');
     const identity = await identify(bearer(request), env, true);
     const headers: Record<string, string> = { 'Content-Type': request.headers.get('Content-Type') ?? '' };
     const length = request.headers.get('Content-Length');
     if (length) headers['Content-Length'] = length;
-    return forward(env, code, '/media', { method: 'POST', identity, headers, body: request.body });
-  }
-  if (action === 'media' && arg && (request.method === 'GET' || request.method === 'DELETE')) {
-    const identity = await identify(bearer(request), env, true);
-    return forward(env, code, `/media/${arg}`, { method: request.method, identity });
+    return forward(env, code, `/media?slot=${encodeURIComponent(slot)}`, { method: 'POST', identity, headers, body: request.body });
   }
   if (action === 'leave' && request.method === 'POST') {
     const identity = await identify(bearer(request), env, true);

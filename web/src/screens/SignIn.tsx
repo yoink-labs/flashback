@@ -29,12 +29,16 @@ export function SignInScreen() {
   }, [back]);
 
   return (
-    <main className="auth">
-      <p className="hint">
-        Signing in is optional. <Link to={back}>Continue as a guest</Link>
-      </p>
-      {failed && <p className="error">Sign-in could not load. You can still play as a guest.</p>}
-      <div ref={node} />
+    <main className="screen auth-screen">
+      <Link className="icon-btn auth-back" to={back} aria-label="Back">
+        ←
+      </Link>
+      {failed && (
+        <p className="field-error" role="alert">
+          Sign-in couldn’t load. You can still play as a guest.
+        </p>
+      )}
+      <div className="auth-mount" ref={node} />
     </main>
   );
 }

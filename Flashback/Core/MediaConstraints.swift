@@ -4,14 +4,13 @@ import Foundation
 /// Limits shared with the Worker (worker/src/media.ts) and the web app (web/src/media.ts).
 enum MediaConstraints {
     static let photoMaxBytes = 3 * 1024 * 1024
-    static let photoMaxPixel: CGFloat = 1600
+    /// Long edge of an uploaded photo. Small payloads keep the Durable Object cheap.
+    static let photoMaxPixel: CGFloat = 1440
+    static let photoQuality = 0.78
     static let videoMaxBytes = 8 * 1024 * 1024
     static let clipTargetSeconds = 6.0
     static let clipMinSeconds = 1.0
     static let clipMaxSeconds = 8.0
-    static let itemsPerPlayer = 10
-    /// How many random items "Pick for me" adds at once.
-    static let randomBatch = 5
 
     static func allows(_ mode: MediaMode, _ kind: MediaKind) -> Bool {
         switch mode { case .both: true; case .photos: kind == .photo; case .videos: kind == .video }
@@ -45,8 +44,6 @@ enum MediaConstraints {
     static func randomIndices<G: RandomNumberGenerator>(count: Int, total: Int, using rng: inout G) -> [Int] {
         Array(Array(0..<total).shuffled(using: &rng).prefix(max(0, count)))
     }
-
-    static func slots(used: Int) -> Int { max(0, itemsPerPlayer - used) }
 }
 
 enum MediaError: LocalizedError, Equatable {

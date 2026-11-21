@@ -1,18 +1,20 @@
 // Client-side media preparation so web players match iOS players:
-//   • Photos: decoded, resized to 1600 px on the long edge, re-encoded as JPEG.
-//     Re-encoding drops EXIF, including GPS.
+//   • Photos: decoded, resized to 1440 px on the long edge, re-encoded as JPEG
+//     (quality ~0.78, typically 150–400 KB). Re-encoding drops EXIF, including GPS.
 //   • Videos: a random 6-second window (shorter if the video is shorter) is
-//     re-encoded to an H.264 MP4 of at most 8 MB, up to 720p, with AAC audio when
-//     the browser can encode it. Uses WebCodecs and mp4-muxer (MIT).
-// Originals are never uploaded. If a browser cannot transcode, the player sees a
-// clear error and nothing is sent.
+//     re-encoded to an H.264 MP4 at about 1.5 Mbps, up to 720p, with AAC audio
+//     when the browser can encode it. Uses WebCodecs and mp4-muxer (MIT).
+// Originals are never uploaded, and nothing is prepared until the player has
+// readied up (one item is kept ready in the background — see deck.ts).
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
 
 export const LIMITS = {
   photoMaxBytes: 3 * 1024 * 1024,
-  photoMaxEdge: 1600,
+  photoMaxEdge: 1440,
+  photoQuality: 0.78,
   videoMaxBytes: 8 * 1024 * 1024,
   videoMaxEdge: 720,
+  videoBitrate: 1_500_000,
   clipTargetSeconds: 6,
   clipMinSeconds: 1,
   clipMaxSeconds: 8,
@@ -58,7 +60,7 @@ export async function preparePhoto(file: File): Promise<Blob> {
   canvas.height = height;
   canvas.getContext('2d')!.drawImage(bitmap, 0, 0, width, height);
   bitmap.close();
-  for (const quality of [0.82, 0.7, 0.55, 0.4]) {
+  for (const quality of [LIMITS.photoQuality, 0.7, 0.55, 0.4]) {
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
     if (blob && blob.size <= LIMITS.photoMaxBytes) return blob;
   }
@@ -72,7 +74,7 @@ const H264_CODECS = ['avc1.42001f', 'avc1.4d401f', 'avc1.640028'];
 async function pickVideoConfig(width: number, height: number): Promise<VideoEncoderConfig | null> {
   if (typeof VideoEncoder === 'undefined') return null;
   for (const codec of H264_CODECS) {
-    const config: VideoEncoderConfig = { codec, width, height, bitrate: 2_000_000, framerate: 30, avc: { format: 'avc' } };
+    const config: VideoEncoderConfig = { codec, width, height, bitrate: LIMITS.videoBitrate, framerate: 30, avc: { format: 'avc' } };
     try {
       if ((await VideoEncoder.isConfigSupported(config)).supported) return config;
     } catch {}
