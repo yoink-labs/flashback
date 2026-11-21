@@ -4,6 +4,7 @@ import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createRoom } from '../api';
 import { AccountControl, NameInput, useNickname } from './Entry';
+import { TIP_URL, TipPill } from '../ui/TipPill';
 
 export function Home() {
   const navigate = useNavigate();
@@ -31,6 +32,7 @@ export function Home() {
   return (
     <main className="screen home-screen">
       <header className="home-top">
+        <TipPill />
         <AccountControl signedIn={signedIn} onGuest={playAsGuest} onAccount={useAccount} />
       </header>
 
@@ -60,7 +62,9 @@ export function Home() {
         </form>
       </div>
 
-      <p className="home-footer">Free · no account · nothing is kept</p>
+      <p className="home-footer">
+        Free · no account · nothing is kept · <a href={TIP_URL}>Tip the devs</a>
+      </p>
     </main>
   );
 }

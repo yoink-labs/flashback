@@ -6,7 +6,12 @@ import SwiftUI
     @StateObject private var account = AccountStore()
     @Environment(\.scenePhase) private var phase
     // Same shared Yoink Labs publishable key as Split. Sign-in is optional.
-    init() { Clerk.configure(publishableKey: "pk_live_Y2xlcmsueW9pbmtsYWJzLmRldiQ") }
+    init() {
+        Clerk.configure(publishableKey: "pk_live_Y2xlcmsueW9pbmtsYWJzLmRldiQ")
+        // Finish tips StoreKit delivers outside the tip sheet (Ask to Buy
+        // approvals, transactions left unfinished by a previous launch).
+        Task { @MainActor in TipJarStore.shared.startObservingTransactions() }
+    }
 
     var body: some Scene {
         WindowGroup {

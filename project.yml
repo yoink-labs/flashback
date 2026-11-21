@@ -16,7 +16,11 @@ targets:
     type: application
     platform: iOS
     sources:
-      - Flashback
+      - path: Flashback
+        excludes:
+          # StoreKit testing config: used by the scheme and unit tests, never
+          # shipped in the app bundle.
+          - Resources/Flashback.storekit
       - path: THIRD_PARTY_NOTICES.md
         buildPhase: resources
     dependencies:
@@ -42,11 +46,18 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Flashback/Resources/Flashback.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     scheme:
+      # Local tip products for simulator and Xcode runs. The real consumables
+      # (dev.yoinklabs.flashback.tip.*) live in App Store Connect.
+      storeKitConfiguration: Flashback/Resources/Flashback.storekit
       testTargets: [FlashbackTests]
   FlashbackTests:
     type: bundle.unit-test
     platform: iOS
-    sources: [FlashbackTests]
+    sources:
+      - FlashbackTests
+      # Bundled so a test can check the config matches the code's product ids.
+      - path: Flashback/Resources/Flashback.storekit
+        buildPhase: resources
     dependencies:
       - target: Flashback
     settings:
