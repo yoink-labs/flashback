@@ -109,7 +109,7 @@ struct ResultsView: View {
             }
 
             if media {
-                mediaView(result.kind, fill: true)
+                mediaView(result.kind)
                     .frame(width: 96, height: 96)
                     .clipShape(RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
                     .overlay(alignment: .bottomTrailing) { SaveMediaButton().padding(4) }
@@ -244,24 +244,24 @@ struct ResultsView: View {
                 .clipShape(RoundedRectangle(cornerRadius: Radius.media, style: .continuous))
                 .overlay(alignment: .bottomLeading) { SaveMediaButton().padding(12) }
         } else {
-            mediaView(kind, fill: false)
+            mediaView(kind)
                 .clipShape(RoundedRectangle(cornerRadius: Radius.media, style: .continuous))
                 .overlay(alignment: .bottomLeading) { SaveMediaButton().padding(12) }
         }
     }
 
-    @ViewBuilder private func mediaView(_ kind: MediaKind, fill: Bool) -> some View {
+    /// Whole media, never cropped (Milestone 5 §6): the square thumbnail in the
+    /// compact header letterboxes onto the stage surface, and the wide pane
+    /// fits the clip or photo.
+    @ViewBuilder private func mediaView(_ kind: MediaKind) -> some View {
         ZStack {
-            fill ? Palette.surface2 : Palette.surface
+            Palette.surface
             if kind == .video, playback.isLoaded {
-                PlayerLayerView(player: playback.player, gravity: fill ? .resizeAspectFill : .resizeAspect)
+                PlayerLayerView(player: playback.player, gravity: .resizeAspect)
             } else if let image = room.revealImage {
-                Color.clear.overlay {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: fill ? .fill : .fit)
-                }
-                .clipped()
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
             } else {
                 Image(systemName: kind.symbol)
                     .font(.title3)

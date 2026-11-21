@@ -38,11 +38,27 @@ final class MediaConstraintsTests: XCTestCase {
         XCTAssertThrowsError(try MediaConstraints.validateClip(duration: 0.4))
     }
 
-    func testFitNeverUpscales() {
-        XCTAssertEqual(MediaConstraints.photoMaxPixel, 1440)
+    func testFitScalesByAreaAndNeverUpscales() {
+        // Milestone 5 §6: 1440 × 1080 of area, a 3072 long edge, no upscale.
+        XCTAssertEqual(MediaConstraints.photoMaxArea, 1_555_200)
+        XCTAssertEqual(MediaConstraints.photoMaxLongEdge, 3072)
         XCTAssertEqual(MediaConstraints.fit(CGSize(width: 4032, height: 3024)), CGSize(width: 1440, height: 1080))
         XCTAssertEqual(MediaConstraints.fit(CGSize(width: 800, height: 600)), CGSize(width: 800, height: 600))
         XCTAssertEqual(MediaConstraints.fit(.zero), .zero)
+
+        // A panorama keeps its width: ~2789 × 558 instead of 1440 × 308.
+        let panorama = MediaConstraints.fit(CGSize(width: 8000, height: 1600))
+        XCTAssertEqual(panorama, CGSize(width: 2789, height: 558))
+        XCTAssertLessThanOrEqual(max(panorama.width, panorama.height), MediaConstraints.photoMaxLongEdge)
+        XCTAssertLessThan(CGFloat(1441), panorama.width)
+
+        // A very tall strip obeys the 3072 long-edge ceiling.
+        let tall = MediaConstraints.fit(CGSize(width: 300, height: 10_000))
+        XCTAssertEqual(tall, CGSize(width: 92, height: 3072))
+
+        XCTAssertEqual(MediaConstraints.thumbnailLongEdge(width: 4032, height: 3024), 1440)
+        XCTAssertEqual(MediaConstraints.thumbnailLongEdge(width: 8000, height: 1600), 2789)
+        XCTAssertEqual(MediaConstraints.thumbnailLongEdge(width: 0, height: 0), MediaConstraints.photoMaxLongEdge)
     }
 
     func testRandomIndicesAreDistinctAndBounded() {
@@ -71,8 +87,9 @@ final class MediaConstraintsTests: XCTestCase {
         let out = CGImageSourceCreateWithData(compressed as CFData, nil)!
         let props = CGImageSourceCopyPropertiesAtIndex(out, 0, nil) as! [CFString: Any]
         XCTAssertNil(props[kCGImagePropertyGPSDictionary])
-        XCTAssertEqual(props[kCGImagePropertyPixelWidth] as? Int, 1440)
-        XCTAssertEqual(props[kCGImagePropertyPixelHeight] as? Int, 960)
+        // Area-based since Milestone 5 §6: 1527 × 1018 (≈ 1.555 Mpx).
+        XCTAssertEqual(props[kCGImagePropertyPixelWidth] as? Int, 1527)
+        XCTAssertEqual(props[kCGImagePropertyPixelHeight] as? Int, 1018)
         XCTAssertLessThanOrEqual(compressed.count, MediaConstraints.photoMaxBytes)
         XCTAssertThrowsError(try MediaProcessor.compressPhoto(Data("not an image".utf8)))
     }

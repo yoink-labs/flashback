@@ -23,6 +23,7 @@
 // file is the game's policy and orchestration.
 import { balancedRoundKinds, bunchFor, deckFits, deckNeed, type Deck } from './bunch';
 import { roundEffectFor, sharpEyesBonus, streakEffectFor } from './effects';
+import { acceptedElapsed, canFixReveal, GUESS_GRACE_MS, plannedRevealAt, revealStart, revealWaitDeadline } from './reveal';
 import { GameError } from './errors';
 import { type MediaKind } from './media';
 import { assertUniqueNickname, normalizeNickname } from './nickname';
@@ -59,8 +60,7 @@ export type { RoomView } from './view';
 /** How many rounds ahead a slot is opened (the current round and the next). */
 export const LOOKAHEAD = 2;
 export const COUNTDOWN_MS = 3_000;
-/** After the round's media is ready, give every client time to receive it. */
-export const MEDIA_SETTLE_MS = 1_200;
+export { GUESS_GRACE_MS, LAG_ALLOWANCE_MS, LATE_ALARM_MS, MEDIA_SETTLE_MS, MEDIA_WAIT_MAX_MS, REVEAL_LEAD_MS } from './reveal';
 /** A requested slot with no upload is reassigned after this long. */
 export const UPLOAD_TIMEOUT_MS = 20_000;
 /** A pause longer than this resumes itself. */
@@ -240,6 +240,8 @@ export class Game {
     if (!this.state.players.some((x) => x.connected)) this.state.emptySince = now;
     this.reassignSlotsFor(id, now);
     if (this.state.phase === 'reveal') this.finishIfEveryoneGuessed(now);
+    // One fewer player to wait for.
+    this.planReveal(now);
   }
 
   /** Host moves to the longest-present connected player, else the longest-present player. */
@@ -269,6 +271,7 @@ export class Game {
     if (s.phase === 'countdown' || s.phase === 'reveal' || s.phase === 'results') {
       if (s.players.length < MIN_PLAYERS) return this.endGame(now);
       if (s.phase === 'reveal') this.finishIfEveryoneGuessed(now);
+      this.planReveal(now);
     }
   }
 
@@ -372,6 +375,7 @@ export class Game {
       requiredKind: kind,
       attempts: 0,
       readyAt: null,
+      loadedBy: [],
       tried: [],
     };
     this.state.slots.push(slot);
@@ -390,17 +394,53 @@ export class Game {
     slot.status = 'ready';
     slot.kind = kind;
     slot.readyAt = now;
-    this.syncCountdown(slot);
+    slot.loadedBy = [];
+    this.planReveal(now);
     s.lastActivityAt = now;
     return slot;
   }
 
-  private syncCountdown(slot: Slot) {
+  /**
+   * Fixes the reveal time once every player can show the media, or the wait
+   * cap passes, and decides the round's effects then (docs/MILESTONE5.md §3).
+   * While paused the upload is accepted but the time is fixed on resume.
+   */
+  private planReveal(now: number) {
     const s = this.state;
-    if (s.phase !== 'countdown' || !s.round || s.round.slotID !== slot.id || slot.readyAt === null) return;
-    // While paused the upload is accepted but the deadline is set on resume.
-    if (this.paused) return;
-    s.phaseEndsAt = Math.max(s.round.countdownStart + COUNTDOWN_MS, slot.readyAt + MEDIA_SETTLE_MS);
+    const round = s.round;
+    if (s.phase !== 'countdown' || !round || round.planned || this.paused) return;
+    const slot = s.slots.find((sl) => sl.id === round.slotID);
+    if (!slot || slot.status !== 'ready' || slot.readyAt === null) return;
+    const gate = { now, readyAt: slot.readyAt, ownerID: slot.ownerID, players: s.players, loadedBy: slot.loadedBy };
+    if (!canFixReveal(gate)) return;
+    s.phaseEndsAt = plannedRevealAt({ ...gate, countdownStart: round.countdownStart, countdownMs: COUNTDOWN_MS });
+    round.ownerID = slot.ownerID;
+    this.decideEffects(round);
+  }
+
+  /** While a fixed reveal waits on someone's media, the cap is a deadline. */
+  private revealWait(): number | null {
+    const s = this.state;
+    const round = s.round;
+    if (s.phase !== 'countdown' || !round || round.planned || this.paused) return null;
+    const slot = s.slots.find((sl) => sl.id === round.slotID);
+    return slot?.status === 'ready' && slot.readyAt !== null ? revealWaitDeadline(slot.readyAt) : null;
+  }
+
+  /** A client's `hello`: its capabilities (docs/MILESTONE5.md §1). */
+  hello(id: string, caps: unknown) {
+    const p = this.require(id);
+    p.fairReveal = Array.isArray(caps) && caps.includes('fairReveal');
+  }
+
+  /** A client has this round's media decoded and ready to show (§3). */
+  mediaReady(id: string, roundIndex: unknown, now: number) {
+    this.require(id);
+    if (typeof roundIndex !== 'number') return;
+    const slot = this.state.slots.find((sl) => sl.round === roundIndex && sl.status === 'ready');
+    if (!slot || slot.loadedBy.includes(id)) return;
+    slot.loadedBy.push(id);
+    this.planReveal(now);
   }
 
   /** The owner cannot supply an item; ask someone else, or give up on the game. */
@@ -427,6 +467,7 @@ export class Game {
     slot.requestedAt = now;
     slot.kind = undefined;
     slot.readyAt = null;
+    slot.loadedBy = [];
     const s = this.state;
     if (s.round?.slotID === slot.id) s.round.ownerID = ownerID;
     s.lastActivityAt = now;
@@ -496,6 +537,7 @@ export class Game {
       ownerID: slot.ownerID,
       kind: null,
       countdownStart: now,
+      planned: false,
       revealAt: null,
       endsAt: null,
       guessers: [],
@@ -506,39 +548,43 @@ export class Game {
       fiftyFiftyUsed: {},
     };
     s.phase = 'countdown';
-    s.phaseEndsAt = slot.readyAt === null ? null : Math.max(now + COUNTDOWN_MS, slot.readyAt + MEDIA_SETTLE_MS);
+    s.phaseEndsAt = null;
+    this.planReveal(now);
   }
 
-  /** Decides the round-wide and every private effect the moment a reveal begins. */
-  private decideEffects(round: RoundState, now: number) {
+  /**
+   * Decides the round-wide and every private effect when the reveal time is
+   * fixed, so countdown views can carry them (streaks can't change until the
+   * round is played).
+   */
+  private decideEffects(round: RoundState) {
     const s = this.state;
+    round.planned = true;
     round.kind = this.slotForRound(round.index)?.requiredKind ?? round.kind;
-    round.revealAt = now;
-    round.endsAt = now + s.settings.timerSeconds * 1000;
-    round.guessers = s.players.filter((p) => p.connected).map((p) => p.id);
     round.effect = roundEffectFor(s.settings.effects, s.settings.timerSeconds, this.random);
     round.streakEffects = {};
-    for (const guesserID of round.guessers) {
-      if (guesserID === round.ownerID) continue;
-      const p = this.player(guesserID);
-      if (!p) continue;
+    for (const p of s.players) {
+      if (p.id === round.ownerID || !p.connected) continue;
       const effect = streakEffectFor(s.settings.effects, p.streak, p.missStreak);
-      if (effect) round.streakEffects[guesserID] = effect;
+      if (effect) round.streakEffects[p.id] = effect;
     }
   }
 
-  guess(id: string, targetID: unknown, now: number) {
-    this.require(id);
+  guess(id: string, targetID: unknown, now: number, claimedElapsed?: unknown) {
+    const p = this.require(id);
     this.requireRunning();
     const s = this.state;
     const round = s.round;
     if (s.phase !== 'reveal' || !round || round.revealAt === null || round.endsAt === null) throw new GameError(409, 'There is nothing to guess right now.');
     if (!round.guessers.includes(id)) throw new GameError(409, 'You joined after this round started.');
     if (round.guesses[id]) throw new GameError(409, 'You already guessed.');
-    if (now > round.endsAt) throw new GameError(409, 'Time is up.');
-    if (typeof targetID !== 'string' || !s.players.some((p) => p.id === targetID)) throw new GameError(422, 'Pick a player.');
+    if (now > round.endsAt + GUESS_GRACE_MS) throw new GameError(409, 'Time is up.');
+    if (typeof targetID !== 'string' || !s.players.some((other) => other.id === targetID)) throw new GameError(422, 'Pick a player.');
     if (round.eliminated[id]?.includes(targetID)) throw new GameError(422, 'Your 50/50 ruled that player out.');
-    round.guesses[id] = { targetID, elapsedMs: Math.max(0, now - round.revealAt) };
+    // Timed from when this player actually saw it, within limits (MILESTONE5 §4).
+    const elapsedMs = acceptedElapsed(now - round.revealAt, claimedElapsed, p.fairReveal === true);
+    if (elapsedMs > round.endsAt - round.revealAt) throw new GameError(409, 'Time is up.');
+    round.guesses[id] = { targetID, elapsedMs };
     s.lastActivityAt = now;
     this.finishIfEveryoneGuessed(now);
   }
@@ -738,6 +784,9 @@ export class Game {
     if (this.paused) throw new GameError(409, 'The game is already paused.');
     if (phase !== 'countdown' && phase !== 'reveal' && phase !== 'results') throw new GameError(409, 'There is nothing to pause right now.');
     beginPause(this.state, now);
+    // A paused reveal shows the timer's own time left, not the grace deadline.
+    const round = this.state.round;
+    if (phase === 'reveal' && round?.endsAt != null) this.state.pausedRemainingMs = Math.max(0, round.endsAt - now);
     this.state.lastActivityAt = now;
   }
 
@@ -752,6 +801,15 @@ export class Game {
   private resumeFromPause(now: number) {
     endPause(this.state, now, COUNTDOWN_MS);
     this.state.lastActivityAt = now;
+    const s = this.state;
+    if (s.phase === 'reveal' && s.round?.endsAt != null) s.phaseEndsAt = s.round.endsAt + GUESS_GRACE_MS;
+    if (s.phase === 'countdown' && s.round && !s.round.planned) {
+      // Resuming gives a full countdown (endPause); the reveal still waits for the media.
+      const resumed = s.phaseEndsAt;
+      s.phaseEndsAt = null;
+      this.planReveal(now);
+      if (s.phaseEndsAt !== null && resumed !== null) s.phaseEndsAt = Math.max(s.phaseEndsAt, resumed);
+    }
     // A reveal may have lost its last waiting guesser while paused.
     this.finishIfEveryoneGuessed(now);
   }
@@ -813,6 +871,8 @@ export class Game {
       this.tried(slot, slot.ownerID);
       this.reassign(slot, now);
     }
+    // A reveal waiting on someone's media may be fixed by time alone.
+    this.planReveal(now);
     for (let guard = 0; guard < 100 && s.phase !== 'closed'; guard++) {
       // While paused there is no phase deadline, and nothing may advance.
       if (this.paused) break;
@@ -823,15 +883,19 @@ export class Game {
         if (!slot || slot.status !== 'ready') {
           // Still waiting for the upload; the timeout above will re-pick.
           s.phaseEndsAt = null;
+          round.planned = false;
           break;
         }
-        // The reveal begins when this tick runs, not when the countdown was
-        // due: a late alarm (hibernation, deploy) must still give the round its
-        // full time rather than skipping it.
+        // Clients flip to the reveal on their own at the planned time, so it
+        // starts then; a very late alarm (hibernation, deploy) starts it now so
+        // the round still gets its full time.
         round.ownerID = slot.ownerID;
-        this.decideEffects(round, now);
+        if (!round.planned) this.decideEffects(round);
+        round.revealAt = revealStart(s.phaseEndsAt, now);
+        round.endsAt = round.revealAt + s.settings.timerSeconds * 1000;
+        round.guessers = s.players.filter((p) => p.connected).map((p) => p.id);
         s.phase = 'reveal';
-        s.phaseEndsAt = round.endsAt;
+        s.phaseEndsAt = round.endsAt + GUESS_GRACE_MS;
         // One round of lookahead: the next round's item is requested now.
         if (round.index + 1 <= s.totalRounds && !this.slotForRound(round.index + 1)) this.createSlot(round.index + 1, now);
         this.finishIfEveryoneGuessed(now);
@@ -879,6 +943,7 @@ export class Game {
       this.idleDeadline(),
       ...s.players.map((p) => (p.connected || p.disconnectedAt === null ? null : p.disconnectedAt + DISCONNECT_GRACE_MS)),
       this.hostGraceDeadline(),
+      this.revealWait(),
       ...s.slots.filter((slot) => slot.status === 'requested').map((slot) => slot.requestedAt + UPLOAD_TIMEOUT_MS),
     ].filter((t): t is number => t !== null);
     return times.length ? Math.min(...times) : null;

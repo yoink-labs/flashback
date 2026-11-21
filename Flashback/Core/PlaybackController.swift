@@ -28,6 +28,9 @@ import SwiftUI
     @Published private(set) var clip: Clip?
     /// An item is loaded and can be shown (the layer is safe to render).
     @Published private(set) var isLoaded = false
+    /// The current clip's displayed size (natural size with rotation applied),
+    /// so the reveal can give it a box with its own aspect ratio (§6).
+    @Published private(set) var videoSize: CGSize?
     /// The player's mute choice for reveals; hover and the preview stay muted.
     @Published var muted = true {
         didSet { player.isMuted = effectiveMuted }
@@ -35,6 +38,7 @@ import SwiftUI
 
     private var looper: AVPlayerLooper?
     private var forcedMuted = false
+    private var sizeWork: Task<Void, Never>?
 
     private var effectiveMuted: Bool { forcedMuted || muted }
 
@@ -61,7 +65,23 @@ import SwiftUI
         }
         clip = Clip(id: id ?? UUID().uuidString, purpose: purpose)
         isLoaded = true
+        loadSize(of: item.asset)
         player.play()
+    }
+
+    /// Reads the clip's displayed size once, applying its rotation.
+    private func loadSize(of asset: AVAsset) {
+        sizeWork?.cancel()
+        videoSize = nil
+        sizeWork = Task { [weak self] in
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let natural = try? await track.load(.naturalSize),
+                  let transform = try? await track.load(.preferredTransform)
+            else { return }
+            guard !Task.isCancelled else { return }
+            let shown = natural.applying(transform)
+            self?.videoSize = CGSize(width: abs(shown.width), height: abs(shown.height))
+        }
     }
 
     /// Keeps the last frame visible (results, and while the host has paused).
@@ -85,5 +105,8 @@ import SwiftUI
         looper?.disableLooping()
         looper = nil
         player.removeAllItems()
+        sizeWork?.cancel()
+        sizeWork = nil
+        videoSize = nil
     }
 }

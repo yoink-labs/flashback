@@ -49,12 +49,42 @@ struct Toast: Equatable, Identifiable {
     private var receiver: Task<Void, Never>?
     private var pinger: Task<Void, Never>?
     private var attempt = 0
-    private var clockOffset: Double = 0
+
+    /// Milestone 5 §2: a monotonic local clock plus the fastest-RTT ping
+    /// offset. Until the first pong the store falls back to the last state's
+    /// `serverNow`, exactly as in Milestone 4.
+    private let localClock: MonotonicClock
+    private var clockSync = ClockOffsetEstimator()
+    private var fallbackOffset: Double = 0
+    private var pendingPings: [Int: Double] = [:]
+    private var nextPingID = 0
+    private var helloSent = false
 
     /// Binary media keyed by (game, round), exactly as the server pushes it.
     private var media: [MediaKey: MediaBlob] = [:]
     private var needMediaSent: Set<MediaKey> = []
     private var showingKey: MediaKey?
+    /// Rounds whose media this device has decoded (§3), so it can ack and flip
+    /// to the reveal locally at `revealAt`.
+    private(set) var readyMedia: Set<MediaKey> = []
+    private var probingMedia: Set<MediaKey> = []
+    /// When the current reveal's media first appeared on screen (§4).
+    private(set) var revealShownAt: Double?
+    /// The key of a reveal this device started itself from a fixed countdown.
+    /// Set by `RoomStore+FairReveal.swift`.
+    @Published var localRevealKey: MediaKey?
+    /// A pick made in a locally started reveal, held until the reveal state
+    /// arrives so it can be sent with the elapsed time measured at the tap.
+    /// It belongs to one (game, round): a stale pick is never sent.
+    struct HeldGuess: Equatable {
+        var targetID: String
+        var elapsedMs: Double
+        var game: Int
+        var round: Int
+    }
+    /// Published so the avatar shows the pick selected while it is held.
+    @Published var heldGuess: HeldGuess?
+    var revealWatcher: Task<Void, Never>?
 
     /// The media showing in this reveal / results, kept so it can be saved.
     private(set) var savable: MediaBlob?
@@ -89,11 +119,13 @@ struct Toast: Equatable, Identifiable {
     init(
         api: APIClient = APIClient(base: APIClient.defaultBase),
         vault: SessionVault = KeychainVault(),
-        deck: DeckStore? = nil
+        deck: DeckStore? = nil,
+        clock: MonotonicClock = MonotonicClock()
     ) {
         self.api = api
         self.vault = vault
         self.deck = deck ?? DeckStore()
+        self.localClock = clock
         self.playback.muted = UserDefaults.standard.object(forKey: Self.muteDefaultsKey) as? Bool ?? true
         self.deck.onChange = { [weak self] in
             self?.sendDeckIfNeeded()
@@ -102,7 +134,8 @@ struct Toast: Equatable, Identifiable {
         }
     }
 
-    var serverNow: Double { Date().timeIntervalSince1970 * 1000 + clockOffset }
+    /// `localNow + offset` (§2): every timer, effect and reveal reads this.
+    var serverNow: Double { localClock.nowMs() + (clockSync.offset ?? fallbackOffset) }
 
     func setMuted(_ muted: Bool) {
         playback.muted = muted
@@ -143,12 +176,23 @@ struct Toast: Equatable, Identifiable {
         lastSentDeck = nil
         media.removeAll()
         needMediaSent.removeAll()
+        resetRevealState()
+        pendingPings.removeAll()
         roomInfo = nil
         previewError = nil
         stopHover()
         playback.stop()
         deck.resetForNewRoom()
         connect()
+    }
+
+    /// Forgets locally derived reveal state (readiness, held pick, local flip).
+    private func resetRevealState() {
+        endLocalReveal()
+        heldGuess = nil
+        readyMedia.removeAll()
+        probingMedia.removeAll()
+        revealShownAt = nil
     }
 
     /// Handles join links: https://flashback.yoinklabs.dev/join/CODE and flashback://join/CODE.
@@ -181,6 +225,8 @@ struct Toast: Equatable, Identifiable {
         playback.stop()
         media.removeAll()
         needMediaSent.removeAll()
+        resetRevealState()
+        pendingPings.removeAll()
         prepared.removeAll()
         lastSentDeck = nil
         connection = .closed(reason)
@@ -235,20 +281,17 @@ struct Toast: Equatable, Identifiable {
         socket = task
         task.resume()
         receiver = Task { [weak self] in await self?.receive(task) }
-        pinger = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30))
-                self?.send(.ping)
-            }
-        }
     }
 
     private func disconnect() {
         receiver?.cancel()
         pinger?.cancel()
+        pinger = nil
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil
         lastSentDeck = nil
+        helloSent = false
+        pendingPings.removeAll()
     }
 
     private func receive(_ task: URLSessionWebSocketTask) async {
@@ -291,8 +334,16 @@ struct Toast: Equatable, Identifiable {
         switch message.type {
         case "state":
             guard let state = message.state else { return }
-            clockOffset = state.serverNow - Date().timeIntervalSince1970 * 1000
+            registerFairReveal()
+            // Until a pong lands, blend with the server's own clock (§2).
+            if !clockSync.hasSample {
+                fallbackOffset = state.serverNow - localClock.nowMs()
+            }
             apply(state)
+        case "pong":
+            guard let id = message.id, let serverNow = message.serverNow,
+                  let sentAt = pendingPings.removeValue(forKey: id) else { return }
+            clockSync.record(sentAt: sentAt, receivedAt: localClock.nowMs(), serverNow: serverNow)
         case "error":
             // Errors from background messages (turn passes, deck counts, media
             // re-requests) must never show: only the round's owner could get them.
@@ -314,24 +365,111 @@ struct Toast: Equatable, Identifiable {
         }
     }
 
+    /// Sends `hello` and starts the ping schedule once per socket (§1, §2).
+    /// Called after the first `state`, so the server already knows the player.
+    private func registerFairReveal() {
+        guard socket != nil, !helloSent else { return }
+        helloSent = true
+        send(.hello(ClientMessage.caps))
+        startClockSync()
+    }
+
+    /// Five pings 200 ms apart, then one every 15 s (§2).
+    private func startClockSync() {
+        pinger?.cancel()
+        pinger = Task { [weak self] in
+            for _ in 0..<5 {
+                guard let self, !Task.isCancelled else { return }
+                self.sendPing()
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                guard let self, !Task.isCancelled else { return }
+                self.sendPing()
+            }
+        }
+    }
+
+    private func sendPing() {
+        guard socket != nil else { return }
+        nextPingID += 1
+        let id = nextPingID
+        pendingPings[id] = localClock.nowMs()
+        // A dropped socket can't grow this without bound.
+        if pendingPings.count > 32 {
+            for old in pendingPings.keys.sorted().prefix(pendingPings.count - 32) {
+                pendingPings.removeValue(forKey: old)
+            }
+        }
+        send(.ping(id: id))
+    }
+
     /// Applies a binary media frame. Internal so tests can drive it.
     func handleMedia(_ data: Data) {
         guard let frame = MediaFrame.parse(data) else { return }
         let key = MediaKey(game: frame.header.game, round: frame.header.round)
-        media[key] = MediaBlob(kind: frame.header.kind, bytes: frame.bytes)
-        if let view, view.phase == .reveal, view.game == key.game, view.round?.index == key.round {
+        let blob = MediaBlob(kind: frame.header.kind, bytes: frame.bytes)
+        media[key] = blob
+        // Decode it now, even if it is for the next round: the ack (§3) is
+        // what lets the server fix the reveal time.
+        probeMedia(key, blob)
+        if let view, view.game == key.game, view.round?.index == key.round,
+           view.phase == .reveal || localRevealKey == key {
             showReveal(key, kind: frame.header.kind)
             syncPlayback()
         }
     }
 
+    /// Marks a round's media ready once it decodes: a photo synchronously, a
+    /// clip by writing it out and asking AVFoundation whether it plays (§3).
+    private func probeMedia(_ key: MediaKey, _ blob: MediaBlob) {
+        guard !readyMedia.contains(key), !probingMedia.contains(key) else { return }
+        switch blob.kind {
+        case .photo:
+            if UIImage(data: blob.bytes) != nil { markMediaReady(key) }
+        case .video:
+            probingMedia.insert(key)
+            let bytes = blob.bytes
+            Task { [weak self] in
+                let ready = await Self.clipIsPlayable(bytes)
+                guard let self else { return }
+                self.probingMedia.remove(key)
+                if ready { self.markMediaReady(key) }
+            }
+        }
+    }
+
+    nonisolated private static func clipIsPlayable(_ bytes: Data) async -> Bool {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("probe-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        do {
+            try bytes.write(to: url, options: .completeFileProtection)
+            let asset = AVURLAsset(url: url)
+            guard try await asset.load(.isPlayable) else { return false }
+            return try await !asset.loadTracks(withMediaType: .video).isEmpty
+        } catch {
+            return false
+        }
+    }
+
+    /// Acks a round's media once per (game, round), then re-checks whether the
+    /// fixed reveal time has passed.
+    private func markMediaReady(_ key: MediaKey) {
+        guard readyMedia.insert(key).inserted else { return }
+        send(.mediaReady(round: key.round))
+        _ = checkLocalReveal()
+    }
+
     func apply(_ state: RoomView) {
         let old = view
         view = state
+        let wasLocalReveal = localRevealKey != nil
+        if state.phase != .countdown { endLocalReveal() }
         // The "Bought ✓" caption belongs to the open break; a pause keeps it.
         if state.phase != .results { lastBought = nil }
         deck.configure(state.settings, bunch: state.bunch)
-        haptics(from: old, to: state)
+        haptics(from: old, to: state, suppressingReveal: wasLocalReveal)
         sendDeckIfNeeded(force: lastSentDeck == nil)
 
         if state.phase != .lobby { stopHover() }
@@ -341,20 +479,47 @@ struct Toast: Equatable, Identifiable {
             if let round = state.round {
                 showReveal(MediaKey(game: state.game, round: round.index), kind: round.kind)
             }
+            // A pick made during a locally started reveal goes out now, with the
+            // elapsed time measured at the tap (§3, §4).
+            flushHeldGuess()
         case .results:
+            // A pick still waiting for a reveal that never came is stale.
+            heldGuess = nil
             // Keep the last frame and the photo for the small results thumbnail,
             // and free every older round's bytes.
             if let ended = state.lastResult?.index {
                 media = media.filter { $0.key.round > ended }
+                readyMedia = readyMedia.filter { $0.round > ended }
+                probingMedia = probingMedia.filter { $0.round > ended }
             }
-        default:
+        case .countdown:
+            if let key = localRevealKey {
+                // The countdown may be paused or restarted: unless its fixed
+                // time is still in the past, go back to the countdown ring
+                // ("clients always read revealAt from the latest view", §3).
+                let stillLive = key.game == state.game
+                    && key.round == state.round?.index
+                    && !state.paused
+                    && (state.round?.revealAt.map { serverNow >= $0 } ?? false)
+                if stillLive {
+                    showReveal(key, kind: state.round?.kind)
+                } else {
+                    endLocalReveal()
+                    clearReveal()
+                }
+            } else {
+                clearReveal()
+            }
+        case .lobby, .podium, .closed:
+            heldGuess = nil
             clearReveal()
-            if state.phase == .lobby || state.phase == .podium {
-                media.removeAll()
-                needMediaSent.removeAll()
-            }
+            media.removeAll()
+            needMediaSent.removeAll()
+            readyMedia.removeAll()
+            probingMedia.removeAll()
         }
 
+        syncLocalReveal()
         syncPlayback()
 
         // Keep prepared items warm; drop them only when they are no longer valid
@@ -377,19 +542,21 @@ struct Toast: Equatable, Identifiable {
         prepared = prepared.filter { isCurrent($0.value) }
     }
 
-    /// The clip plays only in an unpaused reveal; results and a pause hold its
-    /// frame. Other purposes (deck preview, hover) are never touched.
-    private func syncPlayback() {
+    /// The clip plays only in an unpaused reveal (including one this device
+    /// started locally from the countdown); results and a pause hold its frame.
+    /// Other purposes (deck preview, hover) are never touched.
+    func syncPlayback() {
         guard playback.clip?.purpose == .reveal else { return }
-        if view?.phase == .reveal && view?.paused == false { playback.resume() } else { playback.pause() }
+        let revealed = view?.phase == .reveal || localRevealKey != nil
+        if revealed && view?.paused == false { playback.resume() } else { playback.pause() }
     }
 
-    private func haptics(from old: RoomView?, to new: RoomView) {
+    private func haptics(from old: RoomView?, to new: RoomView, suppressingReveal: Bool = false) {
         if old?.me?.ready == false && new.me?.ready == true { Haptics.ready() }
         guard old?.phase != new.phase || old?.round?.index != new.round?.index else { return }
         switch new.phase {
         case .countdown: Haptics.tick()
-        case .reveal: Haptics.reveal()
+        case .reveal: if !suppressingReveal { Haptics.reveal() }
         case .results:
             if let row = new.lastResult?.rows.first(where: { $0.playerID == new.you.id }) {
                 if row.correct { Haptics.correct() } else { Haptics.incorrect() }
@@ -510,8 +677,13 @@ struct Toast: Equatable, Identifiable {
             prepared[item.kind] = nil
             do {
                 try await api.upload(item.data, kind: item.kind, slot: turn.slot, session: session)
-                // The owner keeps its own copy under the same (game, round) key.
-                media[MediaKey(game: turn.game, round: turn.round)] = MediaBlob(kind: item.kind, bytes: item.data)
+                // The owner keeps its own copy under the same (game, round) key,
+                // decoded like any other so it can flip to the reveal at
+                // `revealAt` too (an owner's ack is ignored by the server).
+                let key = MediaKey(game: turn.game, round: turn.round)
+                let blob = MediaBlob(kind: item.kind, bytes: item.data)
+                media[key] = blob
+                probeMedia(key, blob)
                 deck.markUsed(item.itemID)
                 uploaded = true
             } catch let error as APIError where error.status == 409 {
@@ -534,7 +706,7 @@ struct Toast: Equatable, Identifiable {
         revealImage != nil || (playback.clip?.purpose == .reveal && playback.isLoaded)
     }
 
-    private func showReveal(_ key: MediaKey, kind: MediaKind?) {
+    func showReveal(_ key: MediaKey, kind: MediaKind?) {
         if showingKey == key {
             if let blob = media[key], !hasMedia { present(blob) }
             return
@@ -577,6 +749,9 @@ struct Toast: Equatable, Identifiable {
             playback.play(file: url, loop: true, purpose: .reveal, id: "reveal-\(showingKey?.round ?? 0)")
             syncPlayback()
         }
+        // Shown for the first time: the base of this round's elapsed time (§4).
+        if revealShownAt == nil { revealShownAt = serverNow }
+        if let key = showingKey { markMediaReady(key) }
     }
 
     private func clearReveal() {
@@ -584,6 +759,7 @@ struct Toast: Equatable, Identifiable {
         savable = nil
         revealImage = nil
         revealFailed = false
+        revealShownAt = nil
         playback.stop(purpose: .reveal)
         if let revealFile {
             try? FileManager.default.removeItem(at: revealFile)
@@ -672,7 +848,10 @@ struct Toast: Equatable, Identifiable {
 
     // MARK: - Save and toasts
 
-    var canSave: Bool { savable != nil && (view?.phase == .reveal || view?.phase == .results) }
+    var canSave: Bool {
+        let revealed = view?.phase == .reveal || view?.phase == .results || localRevealKey != nil
+        return savable != nil && revealed
+    }
 
     /// Saves this round's photo or clip to the player's library (add-only access).
     /// Local only: it uses the bytes already on the phone.
@@ -712,9 +891,13 @@ struct Toast: Equatable, Identifiable {
     func debugLoad(_ state: RoomView, media: MediaBlob? = nil) {
         session = RoomSession(code: state.code, playerID: state.you.id, nickname: state.me?.nickname ?? "You", token: "debug", expiresAt: 4_000_000_000, joinURL: RoomCode.joinURL(state.code).absoluteString)
         connection = .open
-        clockOffset = state.serverNow - Date().timeIntervalSince1970 * 1000
+        // Fixtures run on this device's clock, with no socket to sync against.
+        clockSync.reset()
+        fallbackOffset = state.serverNow - localClock.nowMs()
         if let media, let round = state.round?.index {
-            self.media[MediaKey(game: state.game, round: round)] = media
+            let key = MediaKey(game: state.game, round: round)
+            self.media[key] = media
+            probeMedia(key, media)
         }
         apply(state)
     }

@@ -60,9 +60,7 @@ export function roomView(state: RoomState, viewerID: string, now: number, startB
     you: { id: viewerID },
     round:
       round && s.phase === 'countdown'
-        ? // `waiting` is about the media, not the clock: a paused countdown
-          // whose upload already landed is not "Shuffling…".
-          { index: round.index, total: s.totalRounds, waiting: s.slots.find((slot) => slot.round === round.index)?.status !== 'ready' }
+        ? countdownRound(s, round, viewerID)
         : round && s.phase === 'reveal'
           ? {
               index: round.index,
@@ -91,3 +89,24 @@ export function roomView(state: RoomState, viewerID: string, now: number, startB
 }
 
 export type RoomView = ReturnType<typeof roomView>;
+
+/**
+ * A countdown's round. `waiting` means the reveal time isn't fixed yet (no
+ * upload, or someone's media is still arriving); a paused countdown whose
+ * upload landed is not "Shuffling…". Once fixed (and not paused) it carries the
+ * planned `revealAt` and the round's effects, so every client flips to the
+ * reveal at the same server time (docs/MILESTONE5.md §3).
+ */
+function countdownRound(s: RoomState, round: NonNullable<RoomState['round']>, viewerID: string) {
+  const paused = s.pausedAt !== null;
+  const uploaded = s.slots.find((slot) => slot.id === round.slotID)?.status === 'ready';
+  const fixed = round.planned && !paused && s.phaseEndsAt !== null;
+  return {
+    index: round.index,
+    total: s.totalRounds,
+    waiting: !uploaded || (!paused && !round.planned),
+    revealAt: fixed ? s.phaseEndsAt : null,
+    // Only once fixed: an open round must not say which kind it needs.
+    ...(fixed ? { kind: round.kind, effect: round.effect, yourEffect: round.streakEffects[viewerID] ?? null } : {}),
+  };
+}

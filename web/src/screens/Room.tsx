@@ -6,11 +6,12 @@ import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import { leaveRoom, normalizeCode, savedSession, type RoomSession } from '../api';
 import { useDeck } from '../deck';
 import { deckKey } from '../deckStore';
+import { guessElapsedMs, revealDue } from '../fair';
 import { releaseThumbs } from '../thumbs';
 import { STANDARD_BUNCH, type ClientMessage, type RoomView, type TurnMessage } from '../types';
 import { PauseIcon, PlayIcon } from '../ui/Icons';
 import { Toaster } from '../ui/Toast';
-import { useRoom } from '../useRoom';
+import { mediaKey, useRoom } from '../useRoom';
 import { Countdown } from '../room/Countdown';
 import { Lobby } from '../room/Lobby';
 import { Podium } from '../room/Podium';
@@ -22,6 +23,14 @@ export function RoomScreen() {
   const session = useMemo(() => savedSession(code), [code]);
   if (!session) return <Navigate to={`/join/${code}`} replace />;
   return <Room session={session} />;
+}
+
+interface PendingPick {
+  /** `${game}:${round}` the tap belongs to. */
+  key: string;
+  targetID: string;
+  /** Measured at the tap, so a held pick keeps its fair time (§4). */
+  elapsedMs: number;
 }
 
 function Room({ session }: { session: RoomSession }) {
@@ -64,6 +73,71 @@ function Room({ session }: { session: RoomSession }) {
     const keep = phase === 'results' ? resultIndex : roundIndex;
     if (keep !== undefined) releaseMedia({ game: game ?? 1, round: keep });
   }, [phase, game, roundIndex, resultIndex, releaseMedia]);
+
+  // docs/MILESTONE5.md §3: while the countdown's reveal time is fixed, watch
+  // the server clock so the reveal can start locally the moment it passes.
+  const roundKey = view?.round ? mediaKey(view.game, view.round.index) : null;
+  const readyInfo = roundKey ? room.ready[roundKey] : undefined;
+  // `revealAt` is present but null until the countdown's time is fixed.
+  const scheduledRevealAt =
+    view?.phase === 'countdown' && !view.paused && typeof view.round?.revealAt === 'number' ? view.round.revealAt : undefined;
+  const [tickNow, setTickNow] = useState<number | null>(null);
+  const serverNow = room.serverNow;
+  useEffect(() => {
+    if (scheduledRevealAt === undefined) {
+      setTickNow(null);
+      return;
+    }
+    setTickNow(serverNow());
+    const timer = setInterval(() => setTickNow(serverNow()), 100);
+    return () => clearInterval(timer);
+  }, [scheduledRevealAt, serverNow]);
+  const localReveal =
+    view !== null &&
+    revealDue({
+      phase: view.phase,
+      revealAt: view.round?.revealAt,
+      now: tickNow ?? room.serverNow(),
+      mediaReady: Boolean(readyInfo),
+      paused: view.paused,
+    });
+
+  // §3/§4: a pick made before the reveal state arrives is shown selected and
+  // held; it is sent — with the elapsed time measured at the tap — as soon as
+  // the reveal state arrives.
+  const [pendingPick, setPendingPick] = useState<PendingPick | null>(null);
+  useEffect(() => {
+    setPendingPick(null);
+  }, [roundKey]);
+  const connection = room.connection;
+  const send = room.send;
+  useEffect(() => {
+    if (!pendingPick || !view || view.phase !== 'reveal' || !view.round) return;
+    if (pendingPick.key !== roundKey) {
+      setPendingPick(null);
+      return;
+    }
+    if (connection !== 'open') return;
+    // The server already has this player's guess, or they are watching.
+    if (view.round.yourGuess || view.round.canGuess === false) {
+      setPendingPick(null);
+      return;
+    }
+    send({ type: 'guess', targetID: pendingPick.targetID, elapsedMs: pendingPick.elapsedMs });
+    setPendingPick(null);
+  }, [pendingPick, view, roundKey, connection, send]);
+  const pickTarget = useCallback(
+    (targetID: string) => {
+      if (!view?.round || !roundKey) return;
+      const at = room.serverNow();
+      const revealAt = view.round.revealAt ?? at;
+      const displayedAt = room.ready[roundKey]?.readyAt ?? at;
+      const elapsedMs = guessElapsedMs(at, revealAt, displayedAt);
+      if (view.phase === 'reveal') room.send({ type: 'guess', targetID, elapsedMs });
+      else setPendingPick({ key: roundKey, targetID, elapsedMs });
+    },
+    [view, roundKey, room],
+  );
 
   const forgetDeck = deck.forget;
   const leave = useCallback(async () => {
@@ -119,8 +193,16 @@ function Room({ session }: { session: RoomSession }) {
 
       <div className="room-body" key={view.phase}>
         {view.phase === 'lobby' && <Lobby view={view} deck={deck} isHost={isHost} send={room.send} onLeave={leave} />}
-        {view.phase === 'countdown' && <Countdown view={view} serverNow={room.serverNow} isHost={isHost} send={room.send} />}
-        {view.phase === 'reveal' && <Reveal view={view} room={room} isHost={isHost} />}
+        {view.phase === 'countdown' && !localReveal && <Countdown view={view} serverNow={room.serverNow} isHost={isHost} send={room.send} />}
+        {(view.phase === 'reveal' || (view.phase === 'countdown' && localReveal)) && (
+          <Reveal
+            view={view}
+            room={room}
+            isHost={isHost}
+            pendingPick={pendingPick && pendingPick.key === roundKey ? pendingPick.targetID : null}
+            onPick={pickTarget}
+          />
+        )}
         {view.phase === 'results' && <Results view={view} room={room} isHost={isHost} />}
         {view.phase === 'podium' && <Podium view={view} isHost={isHost} send={room.send} onLeave={leave} />}
       </div>

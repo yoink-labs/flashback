@@ -9,6 +9,7 @@ import {
   FINISHED_ROOM_GRACE_MS,
   Game,
   GameError,
+  GUESS_GRACE_MS,
   MEDIA_SETTLE_MS,
   newRoom,
   PAUSE_MAX_MS,
@@ -309,12 +310,12 @@ describe('slots and turn-time uploads', () => {
     const slot = slotFor(game, 1);
     expect(game.state.phase).toBe('countdown');
     expect(game.state.phaseEndsAt).toBeNull();
-    expect(game.view(ids[0], T0).round).toEqual({ index: 1, total: 2, waiting: true });
+    expect(game.view(ids[0], T0).round).toMatchObject({ index: 1, total: 2, waiting: true, revealAt: null });
 
     // Ready quickly: the countdown still lasts its full three seconds.
     game.markReady(slot.ownerID, slot.id, slot.requiredKind, T0 + 500);
     expect(game.state.phaseEndsAt).toBe(T0 + COUNTDOWN_MS);
-    expect(game.view(ids[0], T0).round).toEqual({ index: 1, total: 2, waiting: false });
+    expect(game.view(ids[0], T0).round).toMatchObject({ index: 1, total: 2, waiting: false });
 
     // Ready late: clients get MEDIA_SETTLE_MS after the upload.
     const late = new Game(newRoom('ABC234', 'inst', T0), sequenceRandom());
@@ -505,7 +506,7 @@ describe('balanced round kinds', () => {
     const { game, ids } = core();
     game.start(ids[0], T0);
     const view = game.view(ids[1], T0);
-    expect(view.round).toEqual({ index: 1, total: 10, waiting: true });
+    expect(view.round).toMatchObject({ index: 1, total: 10, waiting: true });
     expect(JSON.stringify(view)).not.toMatch(/requiredKind|"kind"/);
   });
 
@@ -592,7 +593,9 @@ describe('reveal, guesses, and scoring', () => {
     game.updateSettings(game.state.players[0].id, { rounds: 1 }, T0);
     game.start(game.state.players[0].id, T0);
     const round = revealRound(game, 1, T0);
-    game.tick(round.endsAt!);
+    game.tick(round.endsAt! + GUESS_GRACE_MS - 1);
+    expect(game.state.phase).toBe('reveal');
+    game.tick(round.endsAt! + GUESS_GRACE_MS);
     expect(game.state.phase).toBe('results');
     expect(game.state.lastResult!.rows.every((row) => row.points === 0 && row.targetID === null)).toBe(true);
   });
@@ -650,7 +653,7 @@ describe('rounds and game end', () => {
     expect(game.state.phase).toBe('reveal');
     expect(game.state.round!.revealAt).toBe(late);
     expect(game.state.round!.endsAt).toBe(late + 20_000);
-    expect(game.state.phaseEndsAt).toBe(late + 20_000);
+    expect(game.state.phaseEndsAt).toBe(late + 20_000 + GUESS_GRACE_MS);
   });
 
   it('gives the next round a full countdown when the results deadline ran late', () => {
@@ -677,9 +680,9 @@ describe('rounds and game end', () => {
     game.updateSettings(ids[0], { rounds: 2, breakSeconds: 4 }, T0);
     game.start(ids[0], T0);
     const round = revealRound(game, 1, T0);
-    game.tick(round.endsAt!);
+    game.tick(round.endsAt! + GUESS_GRACE_MS);
     expect(game.state.phase).toBe('results');
-    expect(game.state.phaseEndsAt).toBe(round.endsAt! + 4_000);
+    expect(game.state.phaseEndsAt).toBe(round.endsAt! + GUESS_GRACE_MS + 4_000);
   });
 
   it('lets the host skip results, end early, and play again in the same room', () => {
@@ -732,7 +735,7 @@ describe('pause and resume', () => {
     expect(game.state.pausedAt).toBe(T0 + 1_000);
     expect(game.state.pausedRemainingMs).toBeNull();
     expect(game.view(ids[1], T0 + 1_000)).toMatchObject({ phase: 'countdown', phaseEndsAt: null, paused: true, pausedRemainingMs: null });
-    expect(game.view(ids[1], T0 + 1_000).round).toEqual({ index: 1, total: 10, waiting: true });
+    expect(game.view(ids[1], T0 + 1_000).round).toMatchObject({ index: 1, total: 10, waiting: true });
     expect(err(() => game.guess(ids[1], ids[0], T0 + 1_100))).toBe('The game is paused.');
 
     // The upload still lands while paused, but the clock does not start.
@@ -747,7 +750,7 @@ describe('pause and resume', () => {
     expect(game.state.pausedAt).toBeNull();
     expect(game.state.pausedRemainingMs).toBeNull();
     expect(game.state.phaseEndsAt).toBe(T0 + 100_000 + COUNTDOWN_MS);
-    expect(game.view(ids[0], T0 + 100_000).round).toEqual({ index: 1, total: 10, waiting: false });
+    expect(game.view(ids[0], T0 + 100_000).round).toMatchObject({ index: 1, total: 10, waiting: false });
     game.tick(T0 + 100_000 + COUNTDOWN_MS);
     expect(game.state.phase).toBe('reveal');
   });
@@ -764,7 +767,7 @@ describe('pause and resume', () => {
     expect(game.state.pausedRemainingMs).toBe(COUNTDOWN_MS - 1_000);
     expect(game.view(ids[1], T0 + 1_000)).toMatchObject({ paused: true, pausedRemainingMs: 2_000 });
     // The upload is in: a paused countdown is frozen, not "Shuffling…".
-    expect(game.view(ids[1], T0 + 1_000).round).toEqual({ index: 1, total: 10, waiting: false });
+    expect(game.view(ids[1], T0 + 1_000).round).toMatchObject({ index: 1, total: 10, waiting: false });
 
     // Time passing while paused changes nothing.
     game.tick(T0 + 60_000);
@@ -806,7 +809,7 @@ describe('pause and resume', () => {
     const shift = resumeAt - (revealAt + 1_000);
     expect(round.revealAt).toBe(revealAt + shift);
     expect(round.endsAt).toBe(endsAt + shift);
-    expect(game.state.phaseEndsAt).toBe(round.endsAt);
+    expect(game.state.phaseEndsAt).toBe(round.endsAt! + GUESS_GRACE_MS);
 
     // 2s and 3s after the shifted reveal, not 92s and 93s.
     game.guess(b, a, resumeAt + 1_000);
@@ -843,11 +846,11 @@ describe('pause and resume', () => {
     game.start(ids[0], T0);
     const slot = slotFor(game, 1);
     game.pause(ids[0], T0 + 1_000);
-    expect(game.view(ids[1], T0 + 1_000).round).toEqual({ index: 1, total: 10, waiting: true });
+    expect(game.view(ids[1], T0 + 1_000).round).toMatchObject({ index: 1, total: 10, waiting: true });
 
     // The media arrived while paused: the countdown is frozen, not waiting.
     game.markReady(slot.ownerID, slot.id, slot.requiredKind, T0 + 2_000);
-    expect(game.view(ids[1], T0 + 3_000).round).toEqual({ index: 1, total: 10, waiting: false });
+    expect(game.view(ids[1], T0 + 3_000).round).toMatchObject({ index: 1, total: 10, waiting: false });
     expect(game.state.phaseEndsAt).toBeNull();
   });
 
@@ -864,6 +867,9 @@ describe('pause and resume', () => {
 
     game.resume(ids[0], endsAt + 60_000);
     game.tick(endsAt + 60_000);
+    // Paused with no time left: on resume only the in-flight guess grace remains.
+    expect(game.state.phase).toBe('reveal');
+    game.tick(endsAt + 60_000 + GUESS_GRACE_MS);
     expect(game.state.phase).toBe('results');
     expect(game.state.lastResult!.index).toBe(1);
   });
@@ -903,7 +909,7 @@ describe('pause and resume', () => {
     game.updateSettings(ids[0], { rounds: 3, breakSeconds: 5 }, T0);
     game.start(ids[0], T0);
     const round = revealRound(game, 1, T0);
-    const resultsAt = round.endsAt!;
+    const resultsAt = round.endsAt! + GUESS_GRACE_MS;
     game.tick(resultsAt);
     expect(game.state.phase).toBe('results');
     expect(game.state.phaseEndsAt).toBe(resultsAt + 5_000);

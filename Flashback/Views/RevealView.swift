@@ -32,7 +32,7 @@ struct RevealView: View {
     private func compact(_ proxy: GeometryProxy) -> some View {
         VStack(spacing: 0) {
             timerBar
-            stage(radius: 0, gravity: .resizeAspectFill)
+            stage(radius: 0)
                 .frame(width: proxy.size.width, height: mediaHeight(proxy.size))
                 .clipped()
             ScrollView(.vertical, showsIndicators: false) {
@@ -50,7 +50,7 @@ struct RevealView: View {
         VStack(spacing: 0) {
             timerBar
             TwoPane { _ in
-                stage(radius: Radius.media, gravity: .resizeAspect)
+                stage(radius: Radius.media)
                     .padding(.leading, 20)
                     .padding(.vertical, 20)
             } trailing: { pane in
@@ -76,12 +76,11 @@ struct RevealView: View {
 
     // MARK: - Media and effects
 
-    private func stage(radius: CGFloat, gravity: AVLayerVideoGravity) -> some View {
+    private func stage(radius: CGFloat) -> some View {
         GeometryReader { proxy in
-            let shorter = min(proxy.size.width, proxy.size.height)
             ZStack {
                 Palette.bg
-                media(shorterSide: shorter, gravity: gravity)
+                mediaBox(in: proxy.size)
                 effectChips
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(12)
@@ -95,33 +94,60 @@ struct RevealView: View {
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
 
-    /// The round effect animates from the server clock. With Reduce Motion the
-    /// end state shows at once (a crossfade as the reveal fades in); the private
-    /// streak effect itself is static and always shows.
-    @ViewBuilder private func media(shorterSide: CGFloat, gravity: AVLayerVideoGravity) -> some View {
-        if round.effect != nil, !reduceMotion {
+    /// Milestone 5 §6: the media is shown whole, in a box with its own aspect
+    /// ratio, centred in the stage. The letterbox is the stage's dark
+    /// background — never a blurred copy of the photo. Every effect attaches
+    /// to this box, so its shorter side and zoom origin are the media's own.
+    @ViewBuilder private func mediaBox(in stage: CGSize) -> some View {
+        let aspect = mediaAspect
+        let size = MediaFraming.size(aspect: aspect, in: stage)
+        let shorter = min(size.width, size.height)
+        content(shorterSide: shorter)
+            .frame(width: size.width, height: size.height)
+            .clipped()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+
+    /// The photo's or clip's own shape; 4:3 until it is known.
+    private var mediaAspect: CGFloat {
+        if round.kind == .video, let videoSize = playback.videoSize {
+            return MediaFraming.aspect(of: videoSize)
+        }
+        if let image = room.revealImage {
+            return MediaFraming.aspect(of: image.size)
+        }
+        return MediaFraming.fallbackAspect
+    }
+
+    /// A round effect animates; so does a streak blur, which now clears over
+    /// the round. Both read the server clock, so every phone shows the same
+    /// frame. With Reduce Motion the end state shows at once; greyscale is
+    /// static and always shows.
+    @ViewBuilder private func content(shorterSide: CGFloat) -> some View {
+        if animates, !reduceMotion {
             TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { _ in
-                mediaContent(
-                    shorterSide: shorterSide,
-                    gravity: gravity,
-                    effects: effectValues(shorterSide: shorterSide, now: room.serverNow)
-                )
+                mediaContent(effects: effectValues(shorterSide: shorterSide, now: room.serverNow))
             }
         } else {
-            mediaContent(
-                shorterSide: shorterSide,
-                gravity: gravity,
-                effects: effectValues(shorterSide: shorterSide, now: room.serverNow, endState: reduceMotion)
-            )
+            mediaContent(effects: effectValues(shorterSide: shorterSide, now: room.serverNow, endState: reduceMotion))
         }
     }
 
-    @ViewBuilder private func mediaContent(shorterSide: CGFloat, gravity: AVLayerVideoGravity, effects: MediaEffectValues) -> some View {
+    private var animates: Bool {
+        round.effect != nil || round.yourEffect?.kind == .blur
+    }
+
+    @ViewBuilder private func mediaContent(effects: MediaEffectValues) -> some View {
         if round.kind == .video, playback.isLoaded, playback.clip?.purpose == .reveal {
-            PlayerLayerView(player: playback.player, gravity: gravity)
+            // The box already has the clip's aspect ratio, so `.resizeAspect`
+            // shows every pixel with no crop.
+            PlayerLayerView(player: playback.player, gravity: .resizeAspect)
                 .modifier(MediaEffects(values: effects))
         } else if let image = room.revealImage {
-            imageView(image)
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .accessibilityLabel("Whose is this?")
                 .modifier(MediaEffects(values: effects))
         } else if room.revealFailed {
             VStack(spacing: 12) {
@@ -139,37 +165,22 @@ struct RevealView: View {
         }
     }
 
-    @ViewBuilder private func imageView(_ image: UIImage) -> some View {
-        if layout == .wide {
-            // Fit on wide; the save button sits on the photo itself, not in
-            // the letterbox.
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .accessibilityLabel("Whose is this?")
-        } else {
-            // Fill the box without letting the image's own size grow the stage
-            // (a bare scaledToFill image overflows its frame).
-            Color.clear
-                .overlay {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                }
-                .clipped()
-                .accessibilityElement()
-                .accessibilityLabel("Whose is this?")
-        }
-    }
-
-    /// The blur, desaturation and zoom for this instant.
+    /// The blur, desaturation and zoom for this instant, from `serverNow` and
+    /// the media box's own shorter side (§5).
     private func effectValues(shorterSide: CGFloat, now: Double, endState: Bool = false) -> MediaEffectValues {
-        let total = max(0, (round.endsAt ?? 0) - (round.revealAt ?? 0))
+        let timerMs = max(0, (round.endsAt ?? 0) - (round.revealAt ?? 0))
         let remaining = view.remainingMs(until: round.endsAt, now: now)
-        let elapsed = EffectMath.elapsedMs(totalMs: total, remainingMs: remaining)
+        let elapsed = EffectMath.elapsedMs(totalMs: timerMs, remainingMs: remaining)
         let progress = endState ? 1 : EffectMath.progress(elapsedMs: elapsed, spanMs: round.effect?.spanMs ?? 0)
         return MediaEffectValues(
-            blur: EffectMath.blurRadius(shorterSide: shorterSide, streak: round.yourEffect, round: round.effect, progress: progress),
+            blur: EffectMath.blurRadius(
+                shorterSide: shorterSide,
+                streak: round.yourEffect,
+                round: round.effect,
+                progress: progress,
+                elapsedMs: elapsed,
+                timerMs: timerMs
+            ),
             grayscale: round.yourEffect?.kind == .greyscale,
             scale: CGFloat(EffectMath.scale(round.effect, progress: progress)),
             origin: round.effect?.origin ?? CGPoint(x: 0.5, y: 0.5)
@@ -281,8 +292,7 @@ struct RevealView: View {
                         eliminated: round.eliminated.contains(player.id),
                         enabled: view.canGuess
                     ) {
-                        room.send(.guess(player.id))
-                        Haptics.lock()
+                        room.guess(player.id)
                     }
                 }
             }

@@ -7,10 +7,11 @@ import UIKit
 /// players and a generated bunch, with no server and no photo library.
 ///
 /// Routes: lobby, lobbyMix, lobbyVideos, lobbyEmpty, lobbyGuest, settings,
-/// settingsEffects, lobbyChips, countdown, shuffling, reveal, revealLocked,
-/// revealPaused, pausedGuest, revealGreyscale, revealBlur, revealFocus,
-/// revealZoom, revealFiftyFifty, revealVideoBlur, results, resultsOwner,
-/// resultsSaveDenied, resultsShop, podium.
+/// settingsEffects, lobbyChips, countdown, countdownReveal, shuffling, reveal,
+/// revealLocked, revealPaused, pausedGuest, revealGreyscale, revealBlur,
+/// revealFocus, revealZoom, revealPanorama, revealTall, revealFiftyFifty,
+/// revealVideoBlur, results, resultsOwner, resultsSaveDenied, resultsShop,
+/// podium.
 @MainActor enum DebugFixtures {
     static func apply(to room: RoomStore) {
         guard let route = TipDebugLaunch.value("uiRoute") else { return }
@@ -50,6 +51,20 @@ import UIKit
             view.phaseEndsAt = now + 2400
             view.round = RoundView(index: 3, total: 10, waiting: false)
             room.debugLoad(view)
+        case "countdownReveal":
+            // Milestone 5 §3: a fixed countdown whose reveal time has passed.
+            // The store flips to the reveal itself, without a reveal message.
+            var view = base(now: now, phase: .countdown)
+            view.phaseEndsAt = now - 100
+            view.round = RoundView(
+                index: 4,
+                total: 10,
+                kind: .photo,
+                revealAt: now - 400,
+                yourEffect: YourEffect(kind: .blur, strength: .medium, trigger: .wrong, streak: 4),
+                effect: RoundEffect(kind: .zoom, spanMs: 20_000, scale: 3, originX: 0.6, originY: 0.45)
+            )
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 9, size: CGSize(width: 2400, height: 600))))
         case "shuffling":
             var view = base(now: now, phase: .countdown)
             view.round = RoundView(index: 3, total: 10, waiting: true)
@@ -78,6 +93,24 @@ import UIKit
             let effect = RoundEffect(kind: .zoom, spanMs: 20_000, scale: 3, originX: 0.35, originY: 0.45)
             let view = revealWithEffect(now: now, effect: effect, revealAt: now - 500)
             room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 6, size: CGSize(width: 900, height: 1200))))
+        case "revealPanorama", "revealTall":
+            // Milestone 5 §6: an extreme shape is shown whole, with the effects
+            // attached to the media's own box (not the screen). The long timer
+            // keeps the zoom and the clearing blur visible in screenshots taken
+            // a few seconds after launch.
+            let panorama = route == "revealPanorama"
+            let effect = RoundEffect(kind: .zoom, spanMs: 60_000, scale: 3, originX: panorama ? 0.72 : 0.45, originY: panorama ? 0.5 : 0.3)
+            var view = revealWithEffect(
+                now: now,
+                yourEffect: YourEffect(kind: .blur, strength: .medium, trigger: .wrong, streak: 4),
+                effect: effect,
+                revealAt: now - 500
+            )
+            view.settings.timerSeconds = 60
+            view.phaseEndsAt = now + 60_000
+            view.round?.endsAt = now + 60_000
+            let size = panorama ? CGSize(width: 2400, height: 600) : CGSize(width: 900, height: 2400)
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: panorama ? 10 : 1, size: size)))
         case "revealFiftyFifty":
             var view = revealWithEffect(now: now, eliminated: ["p3", "p4"], items: PlayerItems(doubleDown: 1, shield: 1))
             view.players[1].items = PlayerItems(fiftyFifty: 2)

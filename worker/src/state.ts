@@ -35,6 +35,8 @@ export interface Player {
   correctCount: number;
   /** Held shop power-ups, public in the view. */
   items: Items;
+  /** Sent `hello` with `fairReveal`: acks media and times its own guesses (M5). */
+  fairReveal?: boolean;
 }
 
 /**
@@ -55,6 +57,8 @@ export interface Slot {
   /** Owners asked for this round so far. */
   attempts: number;
   readyAt: number | null;
+  /** Players who said this slot's media is decoded and ready to show (M5 §3). */
+  loadedBy: string[];
   /** Players already asked for this round; never picked again for it. */
   tried: string[];
 }
@@ -70,6 +74,8 @@ export interface RoundState {
   ownerID: string;
   kind: MediaKind | null;
   countdownStart: number;
+  /** The reveal time is fixed (phaseEndsAt) and effects are decided (M5 §3). */
+  planned: boolean;
   revealAt: number | null;
   endsAt: number | null;
   /** Everyone connected when the reveal began, including the owner. */
@@ -211,7 +217,10 @@ export function normalizeRoom(state: RoomState): RoomState {
   state.schedule = normalizeSchedule(state.schedule);
   state.shopBought = normalizeShopBought(state.shopBought);
   const fallbackKind: MediaKind = state.settings.mediaMode === 'videos' ? 'video' : 'photo';
-  for (const slot of state.slots) slot.requiredKind = slot.requiredKind ?? slot.kind ?? fallbackKind;
+  for (const slot of state.slots) {
+    slot.requiredKind = slot.requiredKind ?? slot.kind ?? fallbackKind;
+    slot.loadedBy = Array.isArray(slot.loadedBy) ? slot.loadedBy : [];
+  }
   for (const player of state.players) {
     player.deck = player.deck ?? { photos: 0, videos: 0 };
     player.missStreak = countIn(player.missStreak, 0, 1_000_000) ? player.missStreak : 0;
@@ -225,6 +234,7 @@ export function normalizeRoom(state: RoomState): RoomState {
     state.round.eliminated = isRecord(state.round.eliminated) ? state.round.eliminated : {};
     state.round.fiftyFiftyUsed = isRecord(state.round.fiftyFiftyUsed) ? state.round.fiftyFiftyUsed : {};
     if (typeof state.round.countdownStart !== 'number') state.round.countdownStart = state.lastActivityAt;
+    if (typeof state.round.planned !== 'boolean') state.round.planned = state.phase !== 'countdown' || state.phaseEndsAt !== null;
   }
   if (state.lastResult) state.lastResult.rows = normalizeRows(state.lastResult.rows);
   return state;

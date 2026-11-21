@@ -4,7 +4,7 @@
 import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { useClerkKeysForTesting } from '../src/clerk';
-import { COUNTDOWN_MS, HOST_GRACE_MS, UPLOAD_TIMEOUT_MS, type RoomView } from '../src/game';
+import { COUNTDOWN_MS, GUESS_GRACE_MS, HOST_GRACE_MS, LAG_ALLOWANCE_MS, REVEAL_LEAD_MS, UPLOAD_TIMEOUT_MS, type RoomView } from '../src/game';
 import { defaultEffects } from '../src/effects';
 import { MESSAGE_LIMIT, MESSAGE_WINDOW_MS, type Room } from '../src/room';
 import { defaultSettings } from '../src/settings';
@@ -344,7 +344,7 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
 
     hostWS.send({ type: 'start' });
     const countdown = await beaWS.state((s) => s.phase === 'countdown');
-    expect(countdown.round).toEqual({ index: 1, total: 2, waiting: true });
+    expect(countdown.round).toEqual({ index: 1, total: 2, waiting: true, revealAt: null });
     expect(countdown.phaseEndsAt).toBeNull();
 
     // Two slots, two different owners, and only those owners are asked.
@@ -591,7 +591,8 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
 
     await setClock(code, pausedAt + 60_000);
     sockets[0].send({ type: 'resume' });
-    const resumed = await sockets[1].state((s) => s.phaseEndsAt === t0 + COUNTDOWN_MS + 20_000 + 60_000);
+    // The reveal closes GUESS_GRACE_MS after its (shifted) timer.
+    const resumed = await sockets[1].state((s) => s.phaseEndsAt === t0 + COUNTDOWN_MS + 20_000 + 60_000 + GUESS_GRACE_MS);
     expect(resumed.paused).toBe(false);
     expect(resumed.pausedRemainingMs).toBeNull();
 
@@ -797,6 +798,69 @@ describe('Milestone 4 over the socket', () => {
     expect(eliminated).not.toContain(owner2);
     expect(results2.lastResult!.rows.find((row) => row.playerID === buyerID)).toMatchObject({ fiftyFifty: true });
     expect(results2.lastResult!.rows.every((row) => 'earnedFiftyFifty' in row && 'doubleDown' in row && 'roundEffect' in row)).toBe(true);
+    for (const handle of sockets) handle.ws.close(1000);
+  });
+});
+
+describe('Milestone 5 over the socket', () => {
+  it('syncs clocks, waits for every client to have the media, shares the reveal time, and times guesses fairly', async () => {
+    const host = await create('Host');
+    const bea = await join(host.code, 'Bea');
+    const cal = await join(host.code, 'Cal');
+    const code = host.code;
+    const t0 = Date.now();
+    await setClock(code, t0);
+    await setDeterministicRandom(code);
+    const sessions = [host, bea, cal];
+    const sockets = await Promise.all(sessions.map((session) => socket(code, session.token, session.playerID)));
+    const tokenOf = new Map(sessions.map((session) => [session.playerID, session.token]));
+    const [hostWS] = sockets;
+
+    // A pong carries the ping's id and the server clock.
+    hostWS.send({ type: 'ping', id: 7 });
+    expect(await hostWS.next((m) => m.type === 'pong')).toMatchObject({ type: 'pong', id: 7, serverNow: t0 });
+
+    for (const handle of sockets) handle.send({ type: 'hello', caps: ['fairReveal'] });
+    hostWS.send({ type: 'settings', rounds: 2, mediaMode: 'photos' });
+    await hostWS.state((s) => s.settings.rounds === 2);
+    await readyAll(sockets);
+    hostWS.send({ type: 'start' });
+    const turns = await turnsOn(sockets, (m) => m.type === 'turn');
+    const first = turns.find((turn) => turn.turn.round === 1)!;
+    const owner = first.socket.playerID;
+    const others = sockets.filter((handle) => handle.playerID !== owner);
+    expect((await upload(code, tokenOf.get(owner)!, fakeJpeg(), 'image/jpeg', first.turn.slot!)).status).toBe(201);
+
+    // Uploaded, but nobody has said it's ready to show: still waiting.
+    const waiting = await others[0].state((s) => s.phase === 'countdown');
+    expect(waiting.round).toEqual({ index: 1, total: 2, waiting: true, revealAt: null });
+
+    const ackAt = t0 + 500;
+    await setClock(code, ackAt);
+    for (const handle of others) handle.send({ type: 'mediaReady', round: 1 });
+    const fixed = await others[1].state((s) => s.phase === 'countdown' && s.round !== null && 'revealAt' in s.round && s.round.revealAt !== null);
+    const revealAt = Math.max(t0 + COUNTDOWN_MS, ackAt + REVEAL_LEAD_MS);
+    expect(fixed.phaseEndsAt).toBe(revealAt);
+    expect(fixed.round).toMatchObject({ index: 1, waiting: false, revealAt, kind: 'photo', effect: null, yourEffect: null });
+
+    await setClock(code, revealAt + 300);
+    expect(await runDurableObjectAlarm(stub(code))).toBe(true);
+    const reveal = await others[0].state((s) => s.phase === 'reveal');
+    // A slightly late alarm keeps the planned start every client already used.
+    expect(reveal.round).toMatchObject({ revealAt, endsAt: revealAt + 20_000 });
+    // The phase closes after the in-flight grace; clients time the round on `endsAt`.
+    expect(reveal.phaseEndsAt).toBe(revealAt + 20_000 + GUESS_GRACE_MS);
+
+    // Bea's guess left 1.6 s after she saw it but arrived 2.5 s in.
+    await setClock(code, revealAt + 2_500);
+    others[0].send({ type: 'guess', targetID: owner, elapsedMs: 1_600 });
+    // Cal claims an impossible 0 ms: trusted only down to the lag allowance.
+    others[1].send({ type: 'guess', targetID: owner, elapsedMs: 0 });
+    sockets.find((handle) => handle.playerID === owner)!.send({ type: 'guess', targetID: owner });
+    const results = await hostWS.state((s) => s.phase === 'results');
+    const row = (id: string) => results.lastResult!.rows.find((r) => r.playerID === id)!;
+    expect(row(others[0].playerID).elapsedMs).toBe(1_600);
+    expect(row(others[1].playerID).elapsedMs).toBe(2_500 - LAG_ALLOWANCE_MS);
     for (const handle of sockets) handle.ws.close(1000);
   });
 });

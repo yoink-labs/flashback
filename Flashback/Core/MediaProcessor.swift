@@ -10,13 +10,16 @@ import UniformTypeIdentifiers
 enum MediaProcessor {
     // ---- photos ----
 
-    /// Downscales and re-encodes image data as a metadata-free JPEG.
+    /// Downscales and re-encodes image data as a metadata-free JPEG. The size
+    /// is area-based (Milestone 5 §6): ImageIO's max pixel is the long edge of
+    /// that fit, so an 8000 × 1600 panorama stays wide instead of shrinking to
+    /// a 1440-px-wide strip.
     static func compressPhoto(_ data: Data) throws -> Data {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw MediaError.unreadable }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: MediaConstraints.photoMaxPixel,
+            kCGImageSourceThumbnailMaxPixelSize: thumbnailLongEdge(source),
             kCGImageSourceShouldCacheImmediately: true,
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { throw MediaError.unreadable }
@@ -29,6 +32,14 @@ enum MediaProcessor {
             if out.length <= MediaConstraints.photoMaxBytes { return out as Data }
         }
         throw MediaError.photoTooLarge
+    }
+
+    /// The source photo's pixel size (pre-rotation; the long edge is the same).
+    private static func thumbnailLongEdge(_ source: CGImageSource) -> Int {
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue ?? 0
+        let height = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue ?? 0
+        return max(1, Int(MediaConstraints.thumbnailLongEdge(width: width, height: height).rounded()))
     }
 
     static func photo(from asset: PHAsset) async throws -> Data {

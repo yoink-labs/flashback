@@ -71,7 +71,7 @@ import XCTest
 
     func testEncodesClientMessages() throws {
         let encode = { (m: ClientMessage) in String(data: try JSONEncoder().encode(m), encoding: .utf8)! }
-        XCTAssertEqual(try encode(.guess("u_2")).sortedJSON, #"{"targetID":"u_2","type":"guess"}"#.sortedJSON)
+        XCTAssertEqual(try encode(.guess("u_2", elapsedMs: 2840)).sortedJSON, #"{"elapsedMs":2840,"targetID":"u_2","type":"guess"}"#.sortedJSON)
         XCTAssertEqual(try encode(.settings(mediaMode: .videos)).sortedJSON, #"{"mediaMode":"videos","type":"settings"}"#.sortedJSON)
         XCTAssertEqual(try encode(.ready(true)).sortedJSON, #"{"ready":true,"type":"ready"}"#.sortedJSON)
         XCTAssertEqual(try encode(.deck(DeckCount(photos: 24, videos: 3))).sortedJSON, #"{"photos":24,"type":"deck","videos":3}"#.sortedJSON)
@@ -81,7 +81,8 @@ import XCTest
         XCTAssertEqual(try encode(.resume).sortedJSON, #"{"type":"resume"}"#.sortedJSON)
         XCTAssertEqual(try encode(.settings(breakSeconds: 10)).sortedJSON, #"{"breakSeconds":10,"type":"settings"}"#.sortedJSON)
         XCTAssertEqual(try encode(.settings(swaps: 0)).sortedJSON, #"{"swaps":0,"type":"settings"}"#.sortedJSON)
-        XCTAssertTrue(ClientMessage.ping.isPing)
+        XCTAssertTrue(ClientMessage.ping(id: nil).isPing)
+        XCTAssertEqual(try encode(.ping(id: 7)).sortedJSON, #"{"id":7,"type":"ping"}"#.sortedJSON)
     }
 
     func testParsesBinaryMediaFrame() throws {

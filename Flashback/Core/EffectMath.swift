@@ -6,6 +6,8 @@ import Foundation
 enum EffectMath {
     /// Focus starts at 8 % of the media's shorter side and eases to 0.
     static let focusBlurFraction: CGFloat = 0.08
+    /// Streak blur is fully sharp by 75 % of the round (Milestone 5 §5).
+    static let blurClearFraction = 0.75
 
     /// Elapsed time in the reveal, from the server's total and the time left
     /// (`RoomView.remainingMs`, which freezes while paused).
@@ -36,10 +38,29 @@ enum EffectMath {
         1 + (max(1, target) - 1) * (1 - easeOut(progress))
     }
 
-    /// The streak effect's blur radius, stacking with focus's (§3, §4).
-    static func blurRadius(shorterSide: CGFloat, streak: YourEffect?, round: RoundEffect?, progress: Double) -> CGFloat {
+    /// The streak blur's radius: the Milestone 4 base (2/4/7 % of the media's
+    /// shorter side) fading linearly to 0 at 75 % of the round (§5):
+    /// `base × max(0, 1 − elapsed / (0.75 × timerMs))`.
+    static func streakBlurRadius(shorterSide: CGFloat, fraction: CGFloat, elapsedMs: Double, timerMs: Double) -> CGFloat {
+        let base = max(0, shorterSide) * max(0, fraction)
+        guard timerMs.isFinite, timerMs > 0 else { return 0 }
+        let elapsed = elapsedMs.isFinite ? max(0, elapsedMs) : 0
+        let fade = max(0, 1 - elapsed / (blurClearFraction * timerMs))
+        return base * CGFloat(fade)
+    }
+
+    /// The streak effect's blur radius, stacking with focus's (§3, §4). Streak
+    /// blur clears over the round; focus eases out over its span.
+    static func blurRadius(
+        shorterSide: CGFloat,
+        streak: YourEffect?,
+        round: RoundEffect?,
+        progress: Double,
+        elapsedMs: Double,
+        timerMs: Double
+    ) -> CGFloat {
         let side = max(0, shorterSide)
-        let streakRadius = side * (streak?.blurFraction ?? 0)
+        let streakRadius = streakBlurRadius(shorterSide: side, fraction: streak?.blurFraction ?? 0, elapsedMs: elapsedMs, timerMs: timerMs)
         let focusRadius = round?.kind == .focus ? self.focusRadius(shorterSide: side, progress: progress) : 0
         return streakRadius + focusRadius
     }

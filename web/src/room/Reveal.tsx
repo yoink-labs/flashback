@@ -6,7 +6,13 @@
 // driven by the server clock (`revealAt` + the socket's skew) and frozen while
 // the host has paused. The power-up bar and the 50/50's greyed-out picks sit
 // under the title.
-import { useEffect, useRef, useState } from 'react';
+//
+// docs/MILESTONE5.md §3–§6: this screen can also be drawn from a fixed
+// countdown (the local reveal), the media sits whole inside a box with its own
+// aspect ratio and every effect attaches to that box, the streak blur clears at
+// 75% of the timer, and each guess carries its tap's `elapsedMs`.
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { BLUR_CLEAR_FRACTION, blurRadiusPx } from '../fair';
 import {
   NO_ITEMS,
   type BlurStrength,
@@ -20,20 +26,41 @@ import { Avatar } from '../ui/Avatar';
 import { BlurIcon, DieIcon, FocusIcon, GreyscaleIcon, ScissorsIcon, ShieldIcon, SpeakerOffIcon, SpeakerOnIcon, ZoomIcon } from '../ui/Icons';
 import { ItemIcons } from '../ui/ItemIcons';
 import { SaveButton } from '../ui/SaveButton';
-import { mediaKey, type MediaEntry, type RoomController } from '../useRoom';
+import { mediaKey, type MediaEntry, type MediaReadyInfo, type RoomController } from '../useRoom';
 import { fiftyFiftyPlayable } from '../settingsModel';
 import { HubVideo } from './PlaybackHub';
 import { clockOf, DrainBar, PauseButton, useSecondsLeft, type Clock } from './Timing';
 
 const MUTE_KEY = 'flashback.muted';
 
-export function Reveal({ view, room, isHost }: { view: RoomView; room: RoomController; isHost: boolean }) {
+export function Reveal({
+  view,
+  room,
+  isHost,
+  pendingPick = null,
+  onPick,
+}: {
+  view: RoomView;
+  room: RoomController;
+  isHost: boolean;
+  /** A pick made before the reveal state arrived, held until it does (§3). */
+  pendingPick?: string | null;
+  onPick: (targetID: string) => void;
+}) {
   const round = view.round;
   if (!round) return null;
-  const entry = room.media[mediaKey(view.game, round.index)];
-  const endsAt = round.endsAt ?? view.phaseEndsAt;
+  const key = mediaKey(view.game, round.index);
+  const entry = room.media[key];
+  const ready = room.ready[key];
+  const timerMs = view.settings.timerSeconds * 1000;
+  // §4: the timer is always against `round.endsAt`, never the grace-inclusive
+  // `phaseEndsAt`. A local reveal does not have `endsAt` yet, so it estimates
+  // from `revealAt` and the round timer.
+  const revealAt = typeof round.revealAt === 'number' ? round.revealAt : undefined;
+  const local = view.phase !== 'reveal';
+  const endsAt = local ? (revealAt !== undefined ? revealAt + timerMs : null) : round.endsAt ?? null;
   const clock = clockOf(view, endsAt, room.serverNow);
-  const total = endsAt !== null && round.revealAt !== undefined ? Math.max(1, endsAt - round.revealAt) : view.settings.timerSeconds * 1000;
+  const total = endsAt !== null && revealAt !== undefined ? Math.max(1, endsAt - revealAt) : timerMs;
 
   return (
     <div className="reveal-screen">
@@ -42,9 +69,11 @@ export function Reveal({ view, room, isHost }: { view: RoomView; room: RoomContr
       <div className="reveal-media">
         <Media
           entry={entry}
+          size={ready}
           kind={round.kind ?? 'photo'}
           paused={view.paused}
-          revealAt={round.revealAt}
+          revealAt={revealAt}
+          timerMs={timerMs}
           streak={round.yourEffect ?? null}
           effect={round.effect ?? null}
           serverNow={room.serverNow}
@@ -65,7 +94,7 @@ export function Reveal({ view, room, isHost }: { view: RoomView; room: RoomContr
           </span>
           <Seconds clock={clock} />
         </div>
-        <GuessPanel view={view} room={room} />
+        <GuessPanel view={view} room={room} pendingPick={pendingPick} onPick={onPick} />
       </div>
     </div>
   );
@@ -76,26 +105,56 @@ function Seconds({ clock }: { clock: Clock }) {
   return <span className="caption seconds">{left}s</span>;
 }
 
+/**
+ * The media fills a box with its own aspect ratio, centred in the dark stage
+ * (§6). The box is what effects attach to: its shorter side sets the blur
+ * radius, its origin fractions anchor the zoom, and the clip wrapper keeps the
+ * zoomed media inside the media's own rectangle (§5).
+ */
 function Media({
   entry,
+  size,
   kind,
   paused,
   revealAt,
+  timerMs,
   streak,
   effect,
   serverNow,
 }: {
   entry: MediaEntry | undefined;
+  size: MediaReadyInfo | undefined;
   kind: 'photo' | 'video';
   paused: boolean;
   revealAt: number | undefined;
+  timerMs: number;
   streak: StreakEffect | null;
   effect: RoundEffect | null;
   serverNow: () => number;
 }) {
   const [slow, setSlow] = useState(false);
-  const [element, setElement] = useState<HTMLElement | null>(null);
-  useMediaEffect(element, streak, effect, revealAt, paused, serverNow);
+  const [box, setBox] = useState<HTMLElement | null>(null);
+  const [muted, setMuted] = useState(true);
+  const [video, setVideo] = useState<HTMLVideoElement | null>(null);
+  useMediaEffect(box, streak, effect, revealAt, timerMs, paused, serverNow);
+
+  // Remember the sound choice across rounds, but only switch sound on once
+  // playback is actually running — browsers block unmuted autoplay.
+  useEffect(() => {
+    if (!video) return;
+    let remembered = false;
+    try {
+      remembered = localStorage.getItem(MUTE_KEY) === 'on';
+    } catch {}
+    if (!remembered) return;
+    const enable = () => {
+      video.muted = false;
+      setMuted(false);
+    };
+    if (!video.paused) enable();
+    else video.addEventListener('playing', enable, { once: true });
+    return () => video.removeEventListener('playing', enable);
+  }, [video]);
 
   useEffect(() => {
     if (entry) return;
@@ -119,8 +178,36 @@ function Media({
     );
   }
 
-  if (kind === 'video' || entry.kind === 'video') return <VideoMedia entry={entry} paused={paused} onVideo={setElement} />;
-  return <img ref={setElement} className="media" src={entry.url} alt="Whose camera roll is this from?" draggable={false} />;
+  // 16:9 until the natural size is known; the round only reveals locally once
+  // the media is decoded, so this is only the M4-server fallback.
+  const ratio = size && size.width > 0 && size.height > 0 ? size.width / size.height : 16 / 9;
+  const videoRound = kind === 'video' || entry.kind === 'video';
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
+    try {
+      localStorage.setItem(MUTE_KEY, next ? 'off' : 'on');
+    } catch {}
+  };
+  return (
+    <>
+      <div className="media-clip" style={{ '--ar': ratio } as CSSProperties} data-testid="media-clip">
+        <div className="media-box" ref={setBox}>
+          {videoRound ? (
+            <HubVideo src={entry.url} playing={!paused} muted={muted} loop className="media" onVideo={setVideo} />
+          ) : (
+            <img className="media" src={entry.url} alt="Whose camera roll is this from?" draggable={false} />
+          )}
+        </div>
+      </div>
+      {/* Outside the box: the effects blur and scale the box, never the buttons. */}
+      {videoRound && (
+        <button type="button" className="round-btn on-media mute-btn" onClick={toggleMute} aria-pressed={!muted} aria-label={muted ? 'Turn sound on' : 'Mute the video'}>
+          {muted ? <SpeakerOffIcon /> : <SpeakerOnIcon />}
+        </button>
+      )}
+    </>
+  );
 }
 
 /** Asks the server to resend the round's media once if it hasn't arrived. */
@@ -134,80 +221,33 @@ function useMediaRequest(room: RoomController, view: RoomView, entry: MediaEntry
   }, [entry, key, room.send, view.round]);
 }
 
-function VideoMedia({ entry, paused, onVideo }: { entry: MediaEntry; paused: boolean; onVideo: (video: HTMLElement | null) => void }) {
-  const [muted, setMuted] = useState(true);
-  const [element, setElement] = useState<HTMLVideoElement | null>(null);
-
-  // Remember the choice across rounds, but only switch sound on once playback
-  // is actually running — browsers block unmuted autoplay.
-  useEffect(() => {
-    if (!element) return;
-    let remembered = false;
-    try {
-      remembered = localStorage.getItem(MUTE_KEY) === 'on';
-    } catch {}
-    if (!remembered) return;
-    const enable = () => {
-      element.muted = false;
-      setMuted(false);
-    };
-    if (!element.paused) enable();
-    else element.addEventListener('playing', enable, { once: true });
-    return () => element.removeEventListener('playing', enable);
-  }, [element, entry.url]);
-
-  const toggle = () => {
-    const next = !muted;
-    setMuted(next);
-    try {
-      localStorage.setItem(MUTE_KEY, next ? 'off' : 'on');
-    } catch {}
-  };
-
-  return (
-    <>
-      <HubVideo
-        src={entry.url}
-        playing={!paused}
-        muted={muted}
-        loop
-        className="media"
-        onVideo={(video) => {
-          setElement(video);
-          onVideo(video);
-        }}
-      />
-      <button type="button" className="round-btn on-media mute-btn" onClick={toggle} aria-pressed={!muted} aria-label={muted ? 'Turn sound on' : 'Mute the video'}>
-        {muted ? <SpeakerOffIcon /> : <SpeakerOnIcon />}
-      </button>
-    </>
-  );
-}
-
 const BLUR_FRACTION: Record<BlurStrength, number> = { light: 0.02, medium: 0.04, heavy: 0.07 };
 /** Focus starts at 8% of the media's shorter side and eases out to 0 (§4). */
 const FOCUS_FRACTION = 0.08;
 const easeOut = (progress: number) => 1 - (1 - progress) ** 3;
 
 /**
- * Draws the streak and round effects on the media element itself, straight
- * from the server clock. A CSS filter's blur is in px, so the fraction is
- * multiplied by the media's shorter side (measured on resize). The animation
- * runs in requestAnimationFrame and writes styles directly — it must not
- * re-render the whole reveal 60 times a second.
+ * Draws the streak and round effects on the media's box, straight from the
+ * server clock. A CSS filter's blur is in px, so the fraction is multiplied by
+ * the box's shorter side (measured on resize). The animation runs in
+ * requestAnimationFrame and writes styles directly — it must not re-render the
+ * whole reveal 60 times a second. The streak blur fades over the round even
+ * when there is no focus/zoom effect, so the loop runs whenever anything is
+ * still changing.
  */
 function useMediaEffect(
   element: HTMLElement | null,
   streak: StreakEffect | null,
   effect: RoundEffect | null,
   revealAt: number | undefined,
+  timerMs: number,
   paused: boolean,
   serverNow: () => number,
 ) {
   const shorter = useRef(0);
   const frozen = useRef<number | null>(null);
-  const live = useRef({ streak, effect, revealAt, paused, serverNow });
-  live.current = { streak, effect, revealAt, paused, serverNow };
+  const live = useRef({ streak, effect, revealAt, timerMs, paused, serverNow });
+  live.current = { streak, effect, revealAt, timerMs, paused, serverNow };
   const paintRef = useRef<() => boolean>(() => true);
 
   paintRef.current = () => {
@@ -215,17 +255,27 @@ function useMediaEffect(
     const current = live.current;
     const side = shorter.current || Math.min(element.clientWidth, element.clientHeight) || 0;
     const filters: string[] = [];
+    const timed = current.revealAt !== undefined;
+    const elapsed = !timed
+      ? 0
+      : current.paused && frozen.current !== null
+        ? frozen.current
+        : Math.max(0, current.serverNow() - current.revealAt!);
     if (current.streak?.kind === 'greyscale') filters.push('grayscale(1)');
-    let blur = current.streak?.kind === 'blur' ? BLUR_FRACTION[current.streak.strength ?? 'medium'] * side : 0;
+    let blur = 0;
     let scale = 1;
     let finished = true;
-    if (current.effect && current.revealAt !== undefined) {
-      const elapsed = current.paused && frozen.current !== null ? frozen.current : Math.max(0, current.serverNow() - current.revealAt);
+    if (current.streak?.kind === 'blur') {
+      blur = blurRadiusPx(BLUR_FRACTION[current.streak.strength ?? 'medium'], side, elapsed, current.timerMs);
+      // §5: sharp by BLUR_CLEAR_FRACTION of the round; until then it changes.
+      finished = !timed || current.timerMs <= 0 || elapsed >= BLUR_CLEAR_FRACTION * current.timerMs;
+    }
+    if (current.effect && timed) {
       const progress = Math.min(1, Math.max(0, elapsed / current.effect.spanMs));
       const eased = easeOut(progress);
       if (current.effect.kind === 'focus') blur += FOCUS_FRACTION * side * (1 - eased);
       else scale = 1 + ((current.effect.scale ?? 4) - 1) * (1 - eased);
-      finished = progress >= 1;
+      finished = finished && progress >= 1;
     }
     if (blur > 0.05) filters.push(`blur(${blur.toFixed(2)}px)`);
     element.style.filter = filters.length ? filters.join(' ') : '';
@@ -235,7 +285,7 @@ function useMediaEffect(
     return finished;
   };
 
-  // The shorter side changes with the viewport (rotation, fold, resize).
+  // The box's shorter side changes with the viewport (rotation, fold, resize).
   useEffect(() => {
     if (!element) return;
     const measure = () => {
@@ -257,7 +307,8 @@ function useMediaEffect(
     paintRef.current();
   }, [paused, revealAt, serverNow]);
 
-  const key = `${streak?.kind ?? ''}:${streak?.strength ?? ''}:${effect?.kind ?? ''}:${effect?.spanMs ?? ''}:${effect?.scale ?? ''}:${revealAt ?? ''}`;
+  const animated = Boolean(effect) || (streak?.kind === 'blur' && revealAt !== undefined && timerMs > 0);
+  const key = `${streak?.kind ?? ''}:${streak?.strength ?? ''}:${effect?.kind ?? ''}:${effect?.spanMs ?? ''}:${effect?.scale ?? ''}:${effect?.originX ?? ''}:${effect?.originY ?? ''}:${revealAt ?? ''}:${timerMs}`;
   useEffect(() => {
     if (!element) return;
     paintRef.current();
@@ -266,7 +317,8 @@ function useMediaEffect(
       element.style.transform = '';
       element.style.transformOrigin = '';
     };
-    if (!effect || paused) return reset;
+    // The paint above already drew the frozen state; no frames while paused.
+    if (!animated || paused) return reset;
     let frame = 0;
     const tick = () => {
       if (paintRef.current()) return;
@@ -280,7 +332,7 @@ function useMediaEffect(
     // `key` already covers the effect's fields; the object itself is rebuilt by
     // every state broadcast, so depending on it would restart the animation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [element, key, paused]);
+  }, [element, key, paused, animated]);
 }
 
 /** The small top-leading chips that explain the effect on the media (§3, §4). */
@@ -306,10 +358,21 @@ function MediaChips({ round }: { round: RoundView }) {
   );
 }
 
-function GuessPanel({ view, room }: { view: RoomView; room: RoomController }) {
+function GuessPanel({
+  view,
+  room,
+  pendingPick,
+  onPick,
+}: {
+  view: RoomView;
+  room: RoomController;
+  pendingPick: string | null;
+  onPick: (targetID: string) => void;
+}) {
   const round = view.round!;
   useMediaRequest(room, view, room.media[mediaKey(view.game, round.index)]);
-  const guess = round.yourGuess ?? null;
+  // A held pick (made before the reveal state arrived) looks like a normal one.
+  const guess = round.yourGuess ?? pendingPick ?? null;
   const locked = Boolean(guess);
   // `canGuess` means "may guess this round" (late joiners cannot). After you
   // have guessed it may be false too, but that is the locked state.
@@ -346,7 +409,7 @@ function GuessPanel({ view, room }: { view: RoomView; room: RoomController }) {
               aria-pressed={picked}
               aria-disabled={out || undefined}
               aria-label={out ? `${player.nickname} is ruled out` : undefined}
-              onClick={() => room.send({ type: 'guess', targetID: player.id })}
+              onClick={() => onPick(player.id)}
             >
               <span className="guess-avatar">
                 <Avatar name={player.nickname} colorIndex={index} size="lg" dimmed={(locked && !picked) || (view.paused && !locked) || out} />
@@ -358,7 +421,7 @@ function GuessPanel({ view, room }: { view: RoomView; room: RoomController }) {
           );
         })}
       </div>
-      {locked && (
+      {locked && round.guessedCount !== undefined && (
         <p className="caption reveal-status" aria-live="polite">
           {guessed} of {guessers} guessed
         </p>

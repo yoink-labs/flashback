@@ -189,10 +189,14 @@ describe('streak effects at the reveal', () => {
     const slot = slotFor(game, 1);
     const owner = slot.ownerID;
     const others = ids.filter((id) => id !== owner);
-    game.markReady(owner, slot.id, slot.requiredKind, T0);
+    // Effects are decided when the reveal time is fixed (the upload here).
     game.player(owner)!.streak = 9;
     game.player(others[0])!.streak = 2;
     game.player(others[1])!.streak = 3;
+    game.markReady(owner, slot.id, slot.requiredKind, T0);
+    // The countdown already carries each viewer's own effect (MILESTONE5 §3).
+    expect(game.view(others[1], T0).round).toMatchObject({ yourEffect: { kind: 'blur', strength: 'heavy', trigger: 'right', streak: 3 } });
+    expect(game.view(owner, T0).round).toMatchObject({ yourEffect: null });
     game.tick(game.state.phaseEndsAt!);
     expect(game.state.phase).toBe('reveal');
 

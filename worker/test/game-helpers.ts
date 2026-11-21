@@ -80,7 +80,8 @@ export function revealRound(game: Game): RoundState {
 }
 
 export function finishRound(game: Game) {
-  if (game.state.phase === 'reveal') game.tick(game.state.round!.endsAt!);
+  // The reveal closes GUESS_GRACE_MS after the timer (docs/MILESTONE5.md §4).
+  if (game.state.phase === 'reveal') game.tick(game.state.phaseEndsAt!);
   expect(game.state.phase).toBe('results');
   return game.state.lastResult!;
 }
