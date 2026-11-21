@@ -355,7 +355,8 @@ private struct TipNotice: View {
 
 // MARK: - Entry points
 
-/// The pink "Tip the devs" capsule on Home's top bar.
+/// The solid pink "Tip the devs" capsule on Home's top bar (white heart and
+/// text, matching Wanderer, Split and yoinklabs.dev).
 struct TipTheDevsButton: View {
     let action: () -> Void
 
@@ -368,10 +369,10 @@ struct TipTheDevsButton: View {
                     .font(.fl(15, .bold))
                     .lineLimit(1)
             }
-            .foregroundStyle(Color.pink)
+            .foregroundStyle(.white)
             .padding(.horizontal, 14)
             .frame(minHeight: 36)
-            .background(Color.pink.opacity(0.16), in: Capsule())
+            .background(Color.pink, in: Capsule())
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }

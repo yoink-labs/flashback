@@ -366,7 +366,7 @@ input:focus-visible {
   gap: 12px;
 }
 
-/* Shared Yoink Labs "Tip the devs" pill: pink, heart, always in the header. */
+/* Shared Yoink Labs "Tip the devs" pill: solid pink, white heart and text, always in the header. */
 .tip-pill {
   display: inline-flex;
   align-items: center;
@@ -374,8 +374,8 @@ input:focus-visible {
   min-height: 36px;
   padding: 0 14px;
   border-radius: 999px;
-  background: rgb(255 55 95 / 0.16);
-  color: #ff5c8a;
+  background: #ff3b6b;
+  color: #fff;
   font-size: 15px;
   font-weight: 700;
   line-height: 1;
@@ -389,7 +389,7 @@ input:focus-visible {
 
 @media (hover: hover) {
   .tip-pill:hover {
-    background: rgb(255 55 95 / 0.26);
+    background: #ff5583;
   }
 }
 
