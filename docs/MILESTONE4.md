@@ -123,7 +123,13 @@ Each person's bunch is sized so every photo they deal can be shown.
   Server checks: phase reveal, not paused, viewer `canGuess`, holds ≥ 1, not
   already used this round. It removes one charge and greys out
   `floor(w / 2)` random **wrong** choices, where wrong choices = every player
-  in the room except the owner. Stored per round per player.
+  in the room except the owner **and the viewer** (who already knows it isn't
+  theirs). Stored per round per player. When `floor(w / 2) == 0` (3 or fewer
+  players for a guesser) it's refused with `409` "There is nobody to cut this
+  round." and **no charge is used**; clients disable the button when
+  `players.length - (viewer is owner ? 1 : 2) < 2`.
+- Guessing a player in your `eliminated` list is refused with `422` "Your
+  50/50 ruled that player out."
 - View (reveal, viewer only): `round.eliminated: string[]` (empty when unused).
 - If used on your own round (you're the owner), the charge is **refunded** when
   the round finishes.
@@ -141,7 +147,8 @@ Enabled by `powerups.shop.enabled`.
 
 - Open during `results` (the break) except after the final round.
   When the shop is enabled, the results phase lasts
-  `max(breakSeconds, 12)` seconds (`SHOP_MIN_BREAK_SECONDS = 12`).
+  `max(breakSeconds, 12)` seconds (`SHOP_MIN_BREAK_SECONDS = 12`), except the
+  final round's results, which keep plain `breakSeconds` (the shop is closed).
 - `{ "type": "buy", "item": "doubleDown" | "shield" | "fiftyFifty" }`:
   one purchase per player per break; hold at most 1 Double Down, 1 Shield,
   2 50/50s; price must be ≤ current score (**no buying you can't afford**);

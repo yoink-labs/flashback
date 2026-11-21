@@ -5,7 +5,10 @@ import { env, SELF, runDurableObjectAlarm, runInDurableObject } from 'cloudflare
 import { afterEach, describe, expect, it } from 'vitest';
 import { useClerkKeysForTesting } from '../src/clerk';
 import { COUNTDOWN_MS, HOST_GRACE_MS, UPLOAD_TIMEOUT_MS, type RoomView } from '../src/game';
+import { defaultEffects } from '../src/effects';
 import { MESSAGE_LIMIT, MESSAGE_WINDOW_MS, type Room } from '../src/room';
+import { defaultSettings } from '../src/settings';
+import { defaultPowerups } from '../src/shop';
 import { clerkFixture, fakeJpeg, fakeMp4 } from './helpers';
 
 const base = 'https://flashback.test';
@@ -232,7 +235,8 @@ describe('rooms over HTTP', () => {
       capacity: 12,
       joinable: true,
       host: 'Host',
-      settings: { rounds: 10, timerSeconds: 20, mediaMode: 'both', breakSeconds: 7, swaps: 3 },
+      settings: defaultSettings(),
+      bunch: { photos: 12, videos: 6 },
     });
   });
 
@@ -444,7 +448,7 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
     live.get(host.playerID)!.send({ type: 'playAgain' });
     const again = await live.get(cal.playerID)!.state((s) => s.phase === 'lobby' && s.game === 2);
     expect(again.players).toHaveLength(3);
-    expect(again.settings).toEqual({ rounds: 2, timerSeconds: 20, mediaMode: 'photos', breakSeconds: 7, swaps: 3 });
+    expect(again.settings).toEqual({ ...defaultSettings(), rounds: 2, timerSeconds: 20, mediaMode: 'photos' });
     // There is no lobby upload path any more.
     expect((await upload(code, host.token, fakeJpeg(), 'image/jpeg', round1.turn.slot!)).status).toBe(409);
     for (const handle of [...sockets, reconnected, extra, ownerAgain]) handle.ws.close(1000);
@@ -553,7 +557,7 @@ describe('a full game over WebSockets with guests and a Clerk player', () => {
     // The new settings keys travel over the socket and are validated like the rest.
     sockets[0].send({ type: 'settings', mediaMode: 'photos', breakSeconds: 5, swaps: 4 });
     const configured = await sockets[0].state((s) => s.settings.breakSeconds === 5 && s.settings.swaps === 4);
-    expect(configured.settings).toEqual({ rounds: 10, timerSeconds: 20, mediaMode: 'photos', breakSeconds: 5, swaps: 4 });
+    expect(configured.settings).toEqual({ ...defaultSettings(), mediaMode: 'photos', breakSeconds: 5, swaps: 4 });
     sockets[0].send({ type: 'settings', breakSeconds: 2 });
     expect((await sockets[0].next((m) => m.type === 'error' && m.request === 'settings')).message).toMatch(/Break must be 3–30/);
     sockets[0].send({ type: 'settings', swaps: 11 });
@@ -679,6 +683,120 @@ describe('misc', () => {
     expect((await upload(code, token, fakeMp4({ durationMs: 20_000 }), 'video/mp4', turn.turn.slot!)).status).toBe(422);
     expect((await upload(code, token, fakeMp4({ codec: 'hvc1' }), 'video/mp4', turn.turn.slot!)).status).toBe(422);
     expect((await upload(code, token, fakeMp4({ durationMs: 6_000 }), 'video/mp4', turn.turn.slot!)).status).toBe(201);
+    for (const handle of sockets) handle.ws.close(1000);
+  });
+});
+
+describe('Milestone 4 over the socket', () => {
+  it('wires Even Split, effects, power-ups, the shop and 50/50 end to end', async () => {
+    const host = await create('Host');
+    const bea = await join(host.code, 'Bea');
+    const cal = await join(host.code, 'Cal');
+    const dee = await join(host.code, 'Dee');
+    const code = host.code;
+    const t0 = Date.now();
+    await setClock(code, t0);
+    await setDeterministicRandom(code);
+    const sessions = [host, bea, cal, dee];
+    const sockets = await Promise.all(sessions.map((session) => socket(code, session.token, session.playerID)));
+    const tokenOf = new Map(sessions.map((session) => [session.playerID, session.token]));
+    const [hostWS, beaWS] = sockets;
+
+    const effects = {
+      ...defaultEffects(),
+      greyscale: { enabled: true, trigger: 'right' as const, after: 3 },
+      blur: { enabled: true, trigger: 'right' as const, after: 5, strength: 'medium' as const },
+    };
+    const powerups = { fiftyFifty: { enabled: true, after: 3 }, shop: { enabled: true } };
+    hostWS.send({ type: 'settings', rounds: 4, mediaMode: 'photos', evenSplit: true, effects, powerups, breakSeconds: 5 });
+    const configured = await hostWS.state((s) => s.settings.rounds === 4 && s.settings.evenSplit);
+    expect(configured.settings.effects).toEqual(effects);
+    expect(configured.settings.powerups).toEqual(powerups);
+    // 4 rounds across 4 players: one photo each.
+    expect(configured.bunch).toEqual({ photos: 1, videos: 0 });
+
+    // The join preview carries the same settings and requirement.
+    const info = await (await SELF.fetch(`${base}/v1/rooms/${code}`)).json<{ settings: Record<string, unknown>; bunch: unknown }>();
+    expect(info.bunch).toEqual({ photos: 1, videos: 0 });
+    expect(info.settings).toMatchObject({ rounds: 4, evenSplit: true, effects, powerups });
+
+    // A bad effect pairing is refused with the contract's message.
+    hostWS.send({ type: 'settings', effects: { ...effects, blur: { ...effects.blur, after: 3 } } });
+    expect((await hostWS.next((m) => m.type === 'error' && m.request === 'settings')).message).toBe('Blur has to start after greyscale.');
+
+    await readyAll(sockets);
+    hostWS.send({ type: 'start' });
+    await hostWS.state((s) => s.phase === 'countdown');
+    const startedTurns = await turnsOn(sockets, (m) => m.type === 'turn');
+    expect(startedTurns).toHaveLength(2);
+    // Every slot's owner can upload during the countdown's lookahead.
+    for (const turn of startedTurns) {
+      const uploaded = await upload(code, tokenOf.get(turn.socket.playerID)!, fakeJpeg(), 'image/jpeg', turn.turn.slot!);
+      expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    }
+    await hostWS.state((s) => s.phase === 'countdown' && s.round !== null && 'waiting' in s.round && s.round.waiting === false);
+
+    const round1 = startedTurns.find((turn) => turn.turn.round === 1)!;
+    const owner1 = round1.socket.playerID;
+    await setClock(code, t0 + COUNTDOWN_MS);
+    expect(await runDurableObjectAlarm(stub(code))).toBe(true);
+    await beaWS.state((s) => s.phase === 'reveal' && s.round !== null && 'index' in s.round && s.round.index === 1);
+
+    // Everyone guesses the round-1 owner, including the owner's decoy.
+    for (const handle of sockets) handle.send({ type: 'guess', targetID: owner1 });
+    const results = await hostWS.state((s) => s.phase === 'results');
+    expect(results.lastResult!.ownerID).toBe(owner1);
+    expect(results.shop).toEqual({ open: true, bought: false, prices: { doubleDown: 250, shield: 200, fiftyFifty: 400 } });
+
+    // The 50/50 and the shop are wired over the socket. The buyer guessed
+    // round 1 right (anyone but its owner), so they can afford one.
+    const buyerWS = sockets.find((handle) => handle.playerID !== owner1)!;
+    const buyerID = buyerWS.playerID;
+    buyerWS.send({ type: 'buy', item: 'fiftyFifty' });
+    const bought = await buyerWS.state((s) => s.shop !== null && (s.shop as { bought: boolean }).bought);
+    expect(bought.shop).toMatchObject({ open: true, bought: true });
+    const buyer = bought.players.find((p) => p.id === buyerID)!;
+    expect(buyer.items).toEqual({ doubleDown: 0, shield: 0, fiftyFifty: 1 });
+    expect(buyer.score).toBe(600); // 1000 for an instant correct guess, minus 400.
+    buyerWS.send({ type: 'buy', item: 'shield' });
+    expect((await buyerWS.next((m) => m.type === 'error' && m.request === 'buy')).message).toBe('One buy per break.');
+
+    // Leave the break, then reveal round 2 (its slot was uploaded already).
+    await setClock(code, results.phaseEndsAt!);
+    expect(await runDurableObjectAlarm(stub(code))).toBe(true);
+    const countdown2 = await hostWS.state((s) => s.phase === 'countdown' && s.round !== null && 'index' in s.round && s.round.index === 2);
+    await setClock(code, countdown2.phaseEndsAt!);
+    expect(await runDurableObjectAlarm(stub(code))).toBe(true);
+    await hostWS.state((s) => s.phase === 'reveal' && s.round !== null && 'index' in s.round && s.round.index === 2);
+
+    buyerWS.send({ type: 'useFiftyFifty' });
+    const used = await buyerWS.state((s) => {
+      const round = s.round as { eliminated?: string[] } | null;
+      return s.phase === 'reveal' && Array.isArray(round?.eliminated) && round.eliminated.length === 1;
+    });
+    const eliminated = (used.round as unknown as { eliminated: string[] }).eliminated;
+    expect(new Set(eliminated).size).toBe(1);
+    expect(used.players.find((p) => p.id === buyerID)!.items.fiftyFifty).toBe(0);
+    // Another viewer's state has no eliminations of its own.
+    const hostAfterUse = await sockets.find((handle) => handle.playerID !== buyerID)!.state((s) => s.players.find((p) => p.id === buyerID)!.items.fiftyFifty === 0);
+    expect((hostAfterUse.round as unknown as { eliminated: string[] }).eliminated).toEqual([]);
+    expect(eliminated).not.toContain(buyerID);
+    const round2Owner = startedTurns.find((turn) => turn.turn.round === 2)!.socket.playerID;
+    expect(eliminated).not.toContain(round2Owner);
+    // Guessing a player the 50/50 ruled out is refused.
+    buyerWS.send({ type: 'guess', targetID: eliminated[0] });
+    expect((await buyerWS.next((m) => m.type === 'error' && m.request === 'guess')).message).toBe('Your 50/50 ruled that player out.');
+    // A player without a charge gets a clear error.
+    const otherWS = sockets.find((handle) => handle.playerID !== buyerID)!;
+    otherWS.send({ type: 'useFiftyFifty' });
+    expect((await otherWS.next((m) => m.type === 'error' && m.request === 'useFiftyFifty')).message).toBe("You don't have a 50/50.");
+
+    for (const handle of sockets) handle.send({ type: 'guess', targetID: round2Owner });
+    const results2 = await hostWS.state((s) => s.phase === 'results' && s.lastResult !== null && s.lastResult.index === 2);
+    const owner2 = results2.lastResult!.ownerID;
+    expect(eliminated).not.toContain(owner2);
+    expect(results2.lastResult!.rows.find((row) => row.playerID === buyerID)).toMatchObject({ fiftyFifty: true });
+    expect(results2.lastResult!.rows.every((row) => 'earnedFiftyFifty' in row && 'doubleDown' in row && 'roundEffect' in row)).toBe(true);
     for (const handle of sockets) handle.ws.close(1000);
   });
 });

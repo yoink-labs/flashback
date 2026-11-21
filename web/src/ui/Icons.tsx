@@ -180,3 +180,112 @@ export function PlayGlyph() {
     </svg>
   );
 }
+
+// ---- Milestone 4 (docs/MILESTONE4.md §9): one 24-unit set with the rest ----
+
+/** circle.lefthalf.filled: the greyscale streak effect. */
+export function GreyscaleIcon({ size = 20 }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2" />
+      <path d="M12 3a9 9 0 010 18z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** drop.fill: the blur streak effect. */
+export function BlurIcon({ size = 20 }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" focusable="false">
+      <path d="M12 3.2s6.2 6.5 6.2 10.4a6.2 6.2 0 01-12.4 0C5.8 9.7 12 3.2 12 3.2z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** scope: the focus round effect. */
+export function FocusIcon({ size = 20 }: IconProps) {
+  return (
+    <Stroke size={size}>
+      <circle cx="12" cy="12" r="7.2" />
+      <path d="M12 2.5v3.4M12 18.1v3.4M2.5 12h3.4M18.1 12h3.4" />
+    </Stroke>
+  );
+}
+
+/** plus.magnifyingglass: the zoom-out round effect. */
+export function ZoomIcon({ size = 20 }: IconProps) {
+  return (
+    <Stroke size={size}>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="M15.5 15.5L20.5 20.5M10.5 7.7v5.6M7.7 10.5h5.6" />
+    </Stroke>
+  );
+}
+
+/** scissors: a 50/50 charge. */
+export function ScissorsIcon({ size = 20 }: IconProps) {
+  return (
+    <Stroke size={size}>
+      <circle cx="6.2" cy="7" r="2.4" />
+      <circle cx="6.2" cy="17" r="2.4" />
+      <path d="M8.2 8.4L20 18M8.2 15.6L20 6" />
+    </Stroke>
+  );
+}
+
+/** cart.fill: the shop. */
+export function CartIcon({ size = 20 }: IconProps) {
+  return (
+    <Stroke size={size}>
+      <path d="M3 4h2.3l2.1 10.4a1.6 1.6 0 001.6 1.3h8.6a1.6 1.6 0 001.6-1.2L21 7.5H6" />
+      <circle cx="9.4" cy="19.3" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="17.7" cy="19.3" r="1.5" fill="currentColor" stroke="none" />
+    </Stroke>
+  );
+}
+
+/** equal.circle.fill: Even Split. */
+export function EvenSplitIcon({ size = 20 }: IconProps) {
+  return (
+    <Stroke size={size}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M7.6 9.6h8.8M7.6 14.4h8.8" />
+    </Stroke>
+  );
+}
+
+/** die.face.5.fill: Double Down. */
+export function DieIcon({ size = 20 }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+      <g fill="currentColor" stroke="none">
+        <circle cx="8.4" cy="8.4" r="1.5" />
+        <circle cx="15.6" cy="8.4" r="1.5" />
+        <circle cx="12" cy="12" r="1.5" />
+        <circle cx="8.4" cy="15.6" r="1.5" />
+        <circle cx="15.6" cy="15.6" r="1.5" />
+      </g>
+    </svg>
+  );
+}
+
+/** shield.fill: Shield. */
+export function ShieldIcon({ size = 20 }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" focusable="false">
+      <path d="M12 2.8l7.4 2.7v5.4c0 4.6-3.1 8.1-7.4 10.3-4.3-2.2-7.4-5.7-7.4-10.3V5.5z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** The small gold coin used beside shop prices. */
+export function CoinIcon({ size = 14 }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="9" fill="currentColor" opacity="0.22" />
+      <circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" strokeWidth="2" />
+      <path d="M12 7.2v9.6M14.4 9.4a3 3 0 00-2.4-1c-1.5 0-2.6.8-2.6 2s1.1 1.8 2.6 2 2.6.9 2.6 2-1.1 2-2.6 2a3 3 0 01-2.4-1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}

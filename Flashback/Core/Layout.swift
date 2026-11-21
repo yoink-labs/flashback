@@ -84,11 +84,14 @@ struct BunchGridMetrics: Equatable {
         return BunchGridMetrics(columns: columns, rows: rows, tile: floor(tile), gap: gap)
     }
 
-    /// Fits inside `width` × `height`, choosing the shape with the larger tiles.
+    /// Fits inside `width` × `height`, choosing the column count whose square
+    /// tiles end up largest. 12 tiles prefer 3×4 or 4×3, 6 prefer 2×3 or 3×2,
+    /// and the same rule covers an Even Split bunch of any size (up to 100).
     static func fitting(width: CGFloat, height: CGFloat, count: Int, gap: CGFloat = BunchGridMetrics.gap) -> BunchGridMetrics {
-        let shapes: [(Int, Int)] = count == DeckState.videoSize ? [(2, 3), (3, 2)] : [(3, 4), (4, 3)]
-        var best = BunchGridMetrics(columns: shapes[0].0, rows: shapes[0].1, tile: 0, gap: gap)
-        for (columns, rows) in shapes {
+        let count = max(1, count)
+        var best = BunchGridMetrics(columns: 1, rows: count, tile: 0, gap: gap)
+        for columns in 1...count {
+            let rows = (count + columns - 1) / columns
             let byWidth = (width - CGFloat(columns - 1) * gap) / CGFloat(columns)
             let byHeight = (height - CGFloat(rows - 1) * gap) / CGFloat(rows)
             let tile = floor(max(0, min(byWidth, byHeight)))

@@ -7,7 +7,7 @@ import { leaveRoom, normalizeCode, savedSession, type RoomSession } from '../api
 import { useDeck } from '../deck';
 import { deckKey } from '../deckStore';
 import { releaseThumbs } from '../thumbs';
-import type { ClientMessage, RoomView, TurnMessage } from '../types';
+import { STANDARD_BUNCH, type ClientMessage, type RoomView, type TurnMessage } from '../types';
 import { PauseIcon, PlayIcon } from '../ui/Icons';
 import { Toaster } from '../ui/Toast';
 import { useRoom } from '../useRoom';
@@ -37,6 +37,7 @@ function Room({ session }: { session: RoomSession }) {
     session: sessionNow,
     mode: view?.settings.mediaMode ?? 'both',
     swaps: view?.settings.swaps ?? 3,
+    sizes: view?.bunch ?? STANDARD_BUNCH,
     phase: view?.phase ?? 'lobby',
     ready: Boolean(me?.ready),
     connected: room.connection === 'open',

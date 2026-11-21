@@ -14,7 +14,7 @@ import * as model from './deckModel';
 import { useStoredDeck } from './deckStore';
 import { canConvertVideos, mediaKindOf, preparePhoto, prepareVideo } from './media';
 import { loadThumb } from './thumbs';
-import type { ClientMessage, MediaKind, MediaMode, Phase, TurnMessage } from './types';
+import type { BunchRequirement, ClientMessage, MediaKind, MediaMode, Phase, TurnMessage } from './types';
 import { toast } from './ui/Toast';
 
 export { kindsFor, type BunchView, type DeckItem, type SwapResult } from './deckModel';
@@ -34,6 +34,8 @@ interface Args {
   mode: MediaMode;
   /** `settings.swaps`: swaps per bunch. */
   swaps: number;
+  /** The room's `bunch`: how many tiles each bunch must hold (docs/MILESTONE4.md §2). */
+  sizes: BunchRequirement;
   phase: Phase;
   ready: boolean;
   connected: boolean;
@@ -113,7 +115,7 @@ export function useDeck(args: Args) {
 
   const addFiles = useCallback(
     (files: File[]) => {
-      const [next, summary] = model.addFiles(modelRef.current, files, mediaKindOf, newID);
+      const [next, summary] = model.addFiles(modelRef.current, files, mediaKindOf, newID, Math.random, ctx.current.sizes);
       commit(next);
       return summary;
     },
@@ -129,7 +131,18 @@ export function useDeck(args: Args) {
     [commit],
   );
 
-  const newBunch = useCallback((kind: MediaKind) => commit(model.newBunch(modelRef.current, kind)), [commit]);
+  const newBunch = useCallback(
+    (kind: MediaKind) => commit(model.newBunch(modelRef.current, kind, Math.random, model.sizeFor(ctx.current.sizes, kind))),
+    [commit],
+  );
+
+  // Even Split (and any host change to it) can grow or shrink the requirement
+  // while the lobby is open. Keep each bunch exactly that size, for free.
+  const sizesKey = `${args.sizes.photos}:${args.sizes.videos}`;
+  useEffect(() => {
+    if (!loaded) return;
+    commit(model.resize(modelRef.current, ctx.current.sizes));
+  }, [sizesKey, loaded, state, commit]);
 
   // Thumbnails double as a cheap readability check: a bunch item this browser
   // can't open at all (HEIC in Chrome, a codec it lacks) is replaced right away
@@ -262,9 +275,9 @@ export function useDeck(args: Args) {
     };
   }, [active, args.mode, canSendVideos, state, prepareNext]);
 
-  const photo = useMemo(() => model.bunchView(state, 'photo', args.swaps), [state, args.swaps]);
-  const video = useMemo(() => model.bunchView(state, 'video', args.swaps), [state, args.swaps]);
-  const counts = useMemo(() => model.deckCounts(state, args.mode, canSendVideos), [state, args.mode, canSendVideos]);
+  const photo = useMemo(() => model.bunchView(state, 'photo', args.swaps, args.sizes.photos), [state, args.swaps, args.sizes.photos]);
+  const video = useMemo(() => model.bunchView(state, 'video', args.swaps, args.sizes.videos), [state, args.swaps, args.sizes.videos]);
+  const counts = useMemo(() => model.deckCounts(state, args.mode, canSendVideos, args.sizes), [state, args.mode, canSendVideos, args.sizes]);
 
   // Tell the server the deck size whenever it changes (or after a reconnect).
   const { connected, send } = args;
@@ -286,7 +299,7 @@ export function useDeck(args: Args) {
     video,
     counts,
     /** The bunches meet the mode's need, exactly as the server checks it. */
-    fits: model.deckFits(counts, args.mode),
+    fits: model.deckFits(counts, args.mode, args.sizes),
     /** False when this browser can't convert clips (no WebCodecs H.264). */
     canSendVideos,
     addFiles,

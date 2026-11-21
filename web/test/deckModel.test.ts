@@ -176,3 +176,60 @@ test('a reload restores the bunches and remembers what was seen or swapped out',
   [restored] = deck.swap(restored, 'photo', 1, 3);
   assert.notEqual(restored.photo.ids[1], outAgain.id);
 });
+
+test('a room-sized bunch deals only what Even Split asks for', () => {
+  const sizes = { photos: 3, videos: 0 };
+  const files = [...Array.from({ length: 20 }, () => photo()), ...Array.from({ length: 4 }, () => video())];
+  const [model, summary] = deck.addFiles(deck.EMPTY_DECK, files, kindOf, newID, Math.random, sizes);
+  assert.equal(summary.added, 24, 'everything picked joins the pool');
+  assert.equal(model.photo.ids.length, 3);
+  assert.equal(model.video.ids.length, 0);
+  assert.equal(deck.bunchView(model, 'photo', 3, 3).full, true);
+  assert.equal(deck.bunchView(model, 'photo', 3, 3).size, 3);
+  assert.deepEqual(deck.deckCounts(model, 'photos', true, sizes), { photos: 3, videos: 0 });
+  assert.ok(deck.deckFits(deck.deckCounts(model, 'photos', true, sizes), 'photos', sizes));
+});
+
+test('a grown requirement auto-deals for free and a shrunk one drops from the end', () => {
+  let model = dealt(20, 10);
+  const before = [...model.photo.ids];
+  model = deck.resize(model, { photos: 4, videos: 2 });
+  assert.equal(model.photo.ids.length, 4);
+  assert.deepEqual(model.photo.ids, before.slice(0, 4), 'the tail is dropped');
+  assert.equal(model.video.ids.length, 2);
+
+  model = deck.resize(model, { photos: 16, videos: 6 });
+  assert.equal(model.photo.ids.length, 16);
+  assert.equal(model.video.ids.length, 6);
+  assert.equal(model.photo.swapsUsed, 0, 'resizing never charges swaps');
+
+  assert.equal(deck.resize(model, { photos: 16, videos: 6 }), model, 'a no-op resize keeps the model');
+});
+
+test('a grown bunch shows the shortfall when the pool cannot fill it', () => {
+  const sizes = { photos: 5, videos: 0 };
+  const [model] = deck.addFiles(deck.EMPTY_DECK, Array.from({ length: 3 }, () => photo()), kindOf, newID, Math.random, sizes);
+  assert.equal(model.photo.ids.length, 3);
+  assert.equal(deck.bunchView(model, 'photo', 3, 5).full, false);
+  assert.ok(!deck.deckFits(deck.deckCounts(model, 'photos', true, sizes), 'photos', sizes));
+  // Picking more tops the bunch straight up to the requirement.
+  const [topped] = deck.addFiles(model, Array.from({ length: 4 }, () => photo()), kindOf, newID, Math.random, sizes);
+  assert.equal(topped.photo.ids.length, 5);
+  assert.ok(deck.deckFits(deck.deckCounts(topped, 'photos', true, sizes), 'photos', sizes));
+});
+
+test('a new bunch deals exactly the required size', () => {
+  let model = dealt(20);
+  model = deck.newBunch(model, 'photo', Math.random, 4);
+  assert.equal(model.photo.ids.length, 4);
+  assert.equal(model.photo.swapsUsed, 0);
+  assert.equal(deck.bunchView(model, 'photo', 3, 4).size, 4);
+  assert.equal(deck.bunchView(model, 'photo', 3, 4).full, true);
+});
+
+test('Even Split videos-only needs no photos and vice versa', () => {
+  const sizes = { photos: 0, videos: 2 };
+  const model = dealt(12, 6);
+  assert.deepEqual(deck.deckCounts(model, 'videos', true, sizes), { photos: 0, videos: 2 });
+  assert.ok(deck.deckFits(deck.deckCounts(model, 'videos', true, sizes), 'videos', sizes));
+});

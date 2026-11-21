@@ -5,6 +5,7 @@
 // Clerk tokens and forwards requests here with an internal identity header; this
 // object is not reachable from the internet.
 import { DurableObject } from 'cloudflare:workers';
+import { bunchFor } from './bunch';
 import { CAPACITY, Game, GameError, newRoom, normalizeRoom, defaultRandomness, type Randomness, type RoomState, type Slot, type TurnRequest } from './game';
 import { kindAllowed, kindForContentType, maxBytes, MediaError, validateMedia, type MediaKind, type MediaMode } from './media';
 import { issueSession, newSessionKey, verifySession, SESSION_REFRESH_WINDOW_SECONDS } from './session';
@@ -249,6 +250,7 @@ export class Room extends DurableObject<Env> {
       joinable: (s.phase === 'lobby' || s.phase === 'podium') && s.players.length < CAPACITY,
       host: host?.nickname ?? null,
       settings: s.settings,
+      bunch: bunchFor(s.settings.mediaMode, s.settings.evenSplit, s.settings.rounds, s.players.length),
     });
   }
 
@@ -403,10 +405,22 @@ export class Room extends DurableObject<Env> {
 
 export type ClientMessage =
   | { type: 'ready'; ready: boolean }
-  | { type: 'settings'; rounds?: unknown; timerSeconds?: unknown; mediaMode?: unknown; breakSeconds?: unknown; swaps?: unknown }
+  | {
+      type: 'settings';
+      rounds?: unknown;
+      timerSeconds?: unknown;
+      mediaMode?: unknown;
+      breakSeconds?: unknown;
+      swaps?: unknown;
+      evenSplit?: unknown;
+      effects?: unknown;
+      powerups?: unknown;
+    }
   | { type: 'deck'; photos?: unknown; videos?: unknown }
   | { type: 'start' }
   | { type: 'guess'; targetID: unknown }
+  | { type: 'useFiftyFifty' }
+  | { type: 'buy'; item?: unknown }
   | { type: 'pass'; slot: string }
   | { type: 'needMedia'; round?: unknown }
   | { type: 'advance' }
@@ -430,6 +444,9 @@ export function apply(game: Game, playerID: string, message: ClientMessage, now:
           mediaMode: message.mediaMode,
           breakSeconds: message.breakSeconds,
           swaps: message.swaps,
+          evenSplit: message.evenSplit,
+          effects: message.effects,
+          powerups: message.powerups,
         },
         now,
       );
@@ -439,6 +456,10 @@ export function apply(game: Game, playerID: string, message: ClientMessage, now:
       return game.start(playerID, now);
     case 'guess':
       return game.guess(playerID, message.targetID, now);
+    case 'useFiftyFifty':
+      return game.useFiftyFifty(playerID, now);
+    case 'buy':
+      return game.buy(playerID, message.item, now);
     case 'pass':
       return game.pass(playerID, String(message.slot), now);
     case 'advance':

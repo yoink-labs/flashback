@@ -18,7 +18,7 @@ struct BunchSteps: View {
         HStack(spacing: 4) {
             ForEach(deck.kinds, id: \.self) { kind in
                 let count = deck.bunch(kind).items.count
-                let size = DeckState.size(kind)
+                let size = deck.requiredSize(kind)
                 let selected = deck.currentStep == kind
                 Button {
                     deck.step = kind
@@ -137,7 +137,7 @@ struct BunchPicker<PickerLabel: View>: View {
     var body: some View {
         PhotosPicker(
             selection: $picked,
-            maxSelectionCount: DeckState.poolLimit,
+            maxSelectionCount: deck.maxPickCount(kind),
             matching: kind == .photo ? .images : .videos,
             preferredItemEncoding: .compatible,
             photoLibrary: .shared(),
@@ -212,7 +212,7 @@ struct BunchGrid: View {
                         insertion: .scale(scale: 0.7).combined(with: .opacity),
                         removal: .opacity
                     ))
-            } else if index < DeckState.size(kind) {
+            } else if index < deck.requiredSize(kind) {
                 Palette.surface
                     .overlay {
                         Image(systemName: kind == .photo ? "photo" : "video")
@@ -307,7 +307,7 @@ struct BunchNote: View {
             let noun = kind == .photo ? "photos" : "videos"
             let other = kind == .photo ? "Videos" : "Photos"
             let hint = mode == .both ? " Pick more or ask the host to switch to \(other)." : " Pick more to play."
-            Text("You have \(have) of \(DeckState.size(kind)) \(noun).\(hint)")
+            Text("You have \(have) of \(deck.requiredSize(kind)) \(noun).\(hint)")
                 .font(.flCaption)
                 .foregroundStyle(Palette.bad)
                 .fixedSize(horizontal: false, vertical: true)
@@ -338,9 +338,17 @@ private struct BunchTile: View {
     @State private var shakes: CGFloat = 0
     @State private var appearedAt = Date.distantPast
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @EnvironmentObject private var room: RoomStore
 
     private var swapping: Bool { deck.swapping.contains(item.id) }
     private var swapsLeft: Int { deck.bunch(item.kind).swapsLeft }
+    /// A pointer is hovering this video and the shared player has it loaded.
+    private var hovering: Bool {
+        item.kind == .video
+            && room.hoverItemID == item.id
+            && room.playback.isLoaded
+            && room.playback.clip?.purpose == .hover
+    }
 
     var body: some View {
         ZStack {
@@ -355,6 +363,13 @@ private struct BunchTile: View {
                 Image(systemName: item.kind.symbol)
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(Palette.text3)
+            }
+            // Inline hover preview on a pointer device (§8): the one shared
+            // player, re-parented into the tile.
+            if hovering {
+                PlayerLayerView(player: room.playback.player, gravity: .resizeAspectFill)
+                    .frame(width: size, height: size)
+                    .allowsHitTesting(false)
             }
             if item.kind == .video {
                 HStack(spacing: 3) {
@@ -382,8 +397,18 @@ private struct BunchTile: View {
         .onTapGesture(perform: swap)
         .onLongPressGesture(minimumDuration: 0.35) {
             Haptics.lock()
+            room.endHoverPreview(item.id)
             deck.previewing = item
         }
+        // Hover-play is for pointer devices only; touch devices keep the hold
+        // to open the full-screen preview.
+        .onContinuousHover { phase in
+            switch phase {
+            case .active: room.beginHoverPreview(item)
+            case .ended: room.endHoverPreview(item.id)
+            }
+        }
+        .onDisappear { room.endHoverPreview(item.id) }
         .onAppear { appearedAt = Date() }
         .task(id: item.id) {
             image = await deck.thumbnail(for: item, size: CGSize(width: size, height: size))
@@ -400,7 +425,7 @@ private struct BunchTile: View {
 
     /// "Photo 3 of 12", "Video 2 of 6, 0:06".
     private var accessibilityLabel: String {
-        let base = "\(item.kind.label) \(index + 1) of \(DeckState.size(item.kind))"
+        let base = "\(item.kind.label) \(index + 1) of \(deck.requiredSize(item.kind))"
         return item.durationLabel.map { "\(base), \($0)" } ?? base
     }
 
@@ -428,21 +453,25 @@ private struct Shake: GeometryEffect {
 
 // MARK: - Full preview
 
-/// Full screen: the photo, or the clip looping muted. Tap anywhere to go back.
+/// Full screen: the photo, or the clip looping muted on the one shared player.
+/// Tap anywhere to go back.
 struct DeckPreview: View {
     var item: DeckItem
     @ObservedObject var deck: DeckStore
+    @EnvironmentObject private var room: RoomStore
     @Environment(\.dismiss) private var dismiss
-    @State private var player: AVQueuePlayer?
-    @State private var looper: AVPlayerLooper?
     @State private var image: UIImage?
+
+    private var showsClip: Bool {
+        item.kind == .video && room.playback.isLoaded && room.playback.clip?.purpose == .preview
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Color.black.ignoresSafeArea()
             Group {
-                if item.kind == .video, let player {
-                    PlayerLayerView(player: player, gravity: .resizeAspect)
+                if showsClip {
+                    PlayerLayerView(player: room.playback.player, gravity: .resizeAspect)
                 } else if let image {
                     Image(uiImage: image)
                         .resizable()
@@ -466,21 +495,17 @@ struct DeckPreview: View {
         }
         .preferredColorScheme(.dark)
         .task { await load() }
-        .onDisappear {
-            player?.pause()
-            looper?.disableLooping()
-        }
+        .onDisappear { room.playback.stop(purpose: .preview) }
     }
 
     private func load() async {
         if item.kind == .photo {
             image = await deck.previewImage(for: item)
-        } else if let playerItem = await deck.playerItem(for: item) {
-            let player = AVQueuePlayer()
-            player.isMuted = true
-            looper = AVPlayerLooper(player: player, templateItem: playerItem)
-            player.play()
-            self.player = player
+        } else {
+            // The full preview takes over the shared player, muted (§8).
+            room.endHoverPreview(item.id)
+            guard let playerItem = await deck.playerItem(for: item) else { return }
+            room.playback.play(playerItem, loop: true, forcedMuted: true, purpose: .preview, id: item.id)
         }
     }
 }

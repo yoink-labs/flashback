@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// Host settings (docs/MILESTONE3.md section 2): Show, Rounds, Time to guess,
-/// Between rounds, Swaps. One aligned label column, each control under its
-/// label, hairlines between. Changes go straight to the room, so every guest
-/// sees them at once. Done is a toolbar item, so it can move to the vertical bar.
+/// Host settings (docs/MILESTONE4.md §9): three groups — Game, Effects,
+/// Power-ups. Changes go straight to the room, so every guest sees them at
+/// once. Done is a toolbar item, so it can move to the vertical bar.
 struct SettingsSheet: View {
     @EnvironmentObject private var room: RoomStore
     @Environment(\.dismiss) private var dismiss
@@ -12,52 +11,35 @@ struct SettingsSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    row("Show") {
-                        EmptyView()
-                    } control: {
-                        modePicker
+            ScrollViewReader { scroller in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        SettingsSectionTitle(text: "Game")
+                        gameSection
+                        SettingsSectionTitle(text: "Effects")
+                            .id("settings-effects")
+                        EffectsSettingsSection(settings: settings)
+                        SettingsSectionTitle(text: "Power-ups")
+                            .id("settings-powerups")
+                        PowerupSettingsSection(settings: settings)
                     }
-                    divider
-                    row("Rounds") {
-                        stepper
-                    } control: {
-                        ChipRow(values: RoomSettings.roundChips, selected: settings.rounds, label: { "\($0)" }) {
-                            room.send(.settings(rounds: $0))
-                        }
-                    }
-                    divider
-                    row("Time to guess") {
-                        value("\(settings.timerSeconds) s")
-                    } control: {
-                        ChipRow(values: RoomSettings.timerChips, selected: settings.timerSeconds, label: { "\($0)" }) {
-                            room.send(.settings(timerSeconds: $0))
-                        }
-                    }
-                    divider
-                    row("Between rounds") {
-                        value("\(settings.breakSeconds) s")
-                    } control: {
-                        ChipRow(values: RoomSettings.breakChips, selected: settings.breakSeconds, label: { "\($0)" }) {
-                            room.send(.settings(breakSeconds: $0))
-                        }
-                    }
-                    divider
-                    row("Swaps") {
-                        value(settings.swaps == 1 ? "1 per bunch" : "\(settings.swaps) per bunch")
-                    } control: {
-                        ChipRow(values: RoomSettings.swapChips, selected: settings.swaps, label: { "\($0)" }) {
-                            room.send(.settings(swaps: $0))
-                        }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 32)
+                    .frame(maxWidth: 560)
+                    .frame(maxWidth: .infinity)
+                }
+                .background(Palette.bg.ignoresSafeArea())
+                #if DEBUG
+                // The sheet is long; this fixture opens it on the expanded effects.
+                .onAppear {
+                    guard TipDebugLaunch.value("uiRoute") == "settingsEffects" else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(350))
+                        scroller.scrollTo("settings-effects", anchor: .top)
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 24)
-                .frame(maxWidth: 560)
-                .frame(maxWidth: .infinity)
+                #endif
             }
-            .background(Palette.bg.ignoresSafeArea())
             .navigationTitle("Game settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Palette.bg, for: .navigationBar)
@@ -80,29 +62,90 @@ struct SettingsSheet: View {
         .accessibilityIdentifier("settings-sheet")
     }
 
-    // MARK: - Rows
+    // MARK: - Game
 
-    private var divider: some View {
-        Rectangle().fill(Palette.line).frame(height: 1)
+    private var gameSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsFieldRow(title: "Show") {
+                EmptyView()
+            } control: {
+                modePicker
+            }
+            divider
+            SettingsFieldRow(title: "Rounds") {
+                SettingsStepper(
+                    value: settings.rounds,
+                    range: RoomSettings.roundsRange,
+                    decreaseLabel: "Fewer rounds",
+                    increaseLabel: "More rounds"
+                ) { room.send(.settings(rounds: $0)) }
+            } control: {
+                ChipRow(values: RoomSettings.roundChips, selected: settings.rounds, label: { "\($0)" }, spacing: 5) {
+                    room.send(.settings(rounds: $0))
+                }
+            }
+            divider
+            SettingsFieldRow(title: "Time to guess") {
+                value("\(settings.timerSeconds) s")
+            } control: {
+                ChipRow(values: RoomSettings.timerChips, selected: settings.timerSeconds, label: { "\($0)" }) {
+                    room.send(.settings(timerSeconds: $0))
+                }
+            }
+            divider
+            betweenRounds
+            divider
+            SettingsFieldRow(title: "Swaps") {
+                value(settings.swaps == 1 ? "1 per bunch" : "\(settings.swaps) per bunch")
+            } control: {
+                ChipRow(values: RoomSettings.swapChips, selected: settings.swaps, label: { "\($0)" }) {
+                    room.send(.settings(swaps: $0))
+                }
+            }
+            divider
+            SettingsToggleRow(
+                title: "Even Split",
+                isOn: evenSplitBinding,
+                caption: "Everyone deals rounds ÷ players. Every photo gets shown."
+            ) {
+                EmptyView()
+            }
+        }
     }
 
-    private func row<Trailing: View, Control: View>(
-        _ title: String,
-        @ViewBuilder trailing: () -> Trailing,
-        @ViewBuilder control: () -> Control
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 12) {
-                Text(title)
-                    .font(.flBodyMedium)
-                    .foregroundStyle(Palette.text)
-                Spacer(minLength: 8)
-                trailing()
+    private var betweenRounds: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SettingsFieldRow(title: "Between rounds") {
+                value("\(settings.rounds > 1 ? settings.effectiveBreakSeconds : settings.breakSeconds) s")
+            } control: {
+                ChipRow(values: RoomSettings.breakChips, selected: settings.breakSeconds, label: { "\($0)" }, spacing: 5) {
+                    room.send(.settings(breakSeconds: $0))
+                }
             }
-            .frame(minHeight: 40)
-            control()
+            if settings.powerups.shop.enabled, settings.breakSeconds < RoomSettings.shopMinBreakSeconds, settings.rounds > 1 {
+                Text("Shop rounds last \(RoomSettings.shopMinBreakSeconds) s")
+                    .font(.flCaption)
+                    .foregroundStyle(Palette.text2)
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("shop-min-break")
+            }
         }
-        .padding(.vertical, 16)
+    }
+
+    private var evenSplitBinding: Binding<Bool> {
+        Binding(
+            get: { settings.evenSplit },
+            set: { value in
+                room.send(.settings(evenSplit: value))
+                Haptics.tick()
+            }
+        )
+    }
+
+    // MARK: - Bits
+
+    private var divider: some View {
+        SettingsHairline()
     }
 
     private func value(_ text: String) -> some View {
@@ -134,34 +177,6 @@ struct SettingsSheet: View {
         .background(Palette.surface2, in: Capsule())
         .accessibilityIdentifier("media-mode")
     }
-
-    private var stepper: some View {
-        HStack(spacing: 12) {
-            stepButton("minus", label: "Fewer rounds", enabled: settings.rounds > RoomSettings.roundsRange.lowerBound) {
-                room.send(.settings(rounds: settings.rounds - 1))
-            }
-            Text("\(settings.rounds)")
-                .font(.fl(20, .heavy))
-                .monospacedDigit()
-                .foregroundStyle(Palette.text)
-                .frame(minWidth: 32)
-                .accessibilityLabel("\(settings.rounds) rounds")
-            stepButton("plus", label: "More rounds", enabled: settings.rounds < RoomSettings.roundsRange.upperBound) {
-                room.send(.settings(rounds: settings.rounds + 1))
-            }
-        }
-    }
-
-    private func stepButton(_ system: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button {
-            action()
-            Haptics.tick()
-        } label: {
-            Label(label, systemImage: system)
-        }
-        .buttonStyle(IconButtonStyle(size: 36))
-        .disabled(!enabled)
-    }
 }
 
 /// Equal-width chips; the selected one is filled with the accent.
@@ -169,10 +184,11 @@ struct ChipRow: View {
     var values: [Int]
     var selected: Int
     var label: (Int) -> String
+    var spacing: CGFloat = 8
     var action: (Int) -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: spacing) {
             ForEach(values, id: \.self) { value in
                 let isSelected = value == selected
                 Button {
@@ -180,10 +196,12 @@ struct ChipRow: View {
                     Haptics.tick()
                 } label: {
                     Text(label(value))
-                        .font(.fl(15, .bold))
+                        .font(.fl(14, .bold))
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                         .foregroundStyle(isSelected ? .white : Palette.text2)
-                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .frame(maxWidth: .infinity, minHeight: 38)
                         .background(isSelected ? Palette.accent : Palette.surface2, in: Capsule())
                         .contentShape(Capsule())
                 }

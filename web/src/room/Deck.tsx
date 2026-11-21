@@ -13,6 +13,7 @@ import type { MediaKind, MediaMode } from '../types';
 import { CheckIcon, PhotoPlusIcon, PlayGlyph, PlusIcon, ShuffleIcon, XIcon } from '../ui/Icons';
 import { toast } from '../ui/Toast';
 import { useModal } from '../ui/useModal';
+import { canHoverPlay, HubVideo } from './PlaybackHub';
 
 const HOLD_MS = 350;
 /** A second tap this soon on the tile that just changed is a double-tap, not another swap. */
@@ -20,6 +21,12 @@ const DOUBLE_TAP_MS = 400;
 
 const swapsLine = (left: number) => (left <= 0 ? 'No swaps left · New bunch' : `${left} ${left === 1 ? 'swap' : 'swaps'} left`);
 const noun = (kind: MediaKind, count = 2) => (kind === 'photo' ? (count === 1 ? 'photo' : 'photos') : count === 1 ? 'video' : 'videos');
+/** The pick-all-at-once hint, sized to what the room actually deals (Even Split can ask for 3). */
+const pickCopy = (kind: MediaKind, size: number) => {
+  if (kind === 'photo' && size === 12) return 'Select 20 or more. We deal you 12.';
+  if (kind === 'video' && size === 6) return 'Select 10 or more. We deal you 6.';
+  return `Select ${Math.max(4, size * 2)} or more. We deal you ${size}.`;
+};
 
 export function Deck({ deck, mode, step, onStep }: { deck: Deck; mode: MediaMode; step: MediaKind; onStep: (kind: MediaKind) => void }) {
   const input = useRef<HTMLInputElement>(null);
@@ -113,7 +120,7 @@ export function Deck({ deck, mode, step, onStep }: { deck: Deck; mode: MediaMode
             <button type="button" className="btn primary bunch-pick" onClick={(event) => (event.stopPropagation(), pick())} data-testid="pick-media">
               {pickLabel}
             </button>
-            <p className="caption">{kind === 'photo' ? 'Select 20 or more. We deal you 12.' : 'Select 10 or more. We deal you 6.'}</p>
+            <p className="caption">{pickCopy(kind, bunch.size)}</p>
             <p className="caption bunch-privacy">Only the {kind === 'photo' ? 'photo' : 'video'} picked each round is sent.</p>
           </div>
         ) : (
@@ -221,6 +228,30 @@ const Tile = memo(function Tile({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const start = useRef<{ x: number; y: number } | null>(null);
   const held = useRef(false);
+  // Hover play (docs/MILESTONE4.md §8): a fine pointer resting on a video tile
+  // for 250 ms plays it inline, through the shared PlaybackHub.
+  const [hoverURL, setHoverURL] = useState<string | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const objectURL = useRef<string | null>(null);
+
+  const stopHover = () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    if (objectURL.current) {
+      URL.revokeObjectURL(objectURL.current);
+      objectURL.current = null;
+      setHoverURL(null);
+    }
+  };
+
+  const startHover = () => {
+    if (item.kind !== 'video' || hoverTimer.current || objectURL.current || !canHoverPlay()) return;
+    hoverTimer.current = setTimeout(() => {
+      hoverTimer.current = null;
+      objectURL.current = URL.createObjectURL(item.file);
+      setHoverURL(objectURL.current);
+    }, 250);
+  };
 
   const cancel = () => {
     if (timer.current) clearTimeout(timer.current);
@@ -228,7 +259,12 @@ const Tile = memo(function Tile({
     start.current = null;
   };
 
-  useEffect(() => cancel, []);
+  useEffect(() => {
+    return () => {
+      cancel();
+      stopHover();
+    };
+  }, [item.id]);
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0) return;
@@ -237,6 +273,7 @@ const Tile = memo(function Tile({
     timer.current = setTimeout(() => {
       held.current = true;
       timer.current = null;
+      stopHover();
       navigator.vibrate?.(8);
       onPreview(item, slot);
     }, HOLD_MS);
@@ -276,11 +313,15 @@ const Tile = memo(function Tile({
       aria-label={`${name}. Tap to swap, hold to preview`}
       aria-keyshortcuts="P"
       data-testid="bunch-tile"
+      onPointerEnter={startHover}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={cancel}
       onPointerCancel={cancel}
-      onPointerLeave={cancel}
+      onPointerLeave={() => {
+        cancel();
+        stopHover();
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         cancel();
@@ -297,6 +338,7 @@ const Tile = memo(function Tile({
       onKeyDown={onKeyDown}
     >
       <TileFace key={item.id} item={item} />
+      {hoverURL && <HubVideo src={hoverURL} muted loop playing className="tile-video" />}
     </button>
     {/* Holding is not available to everyone: screen readers reach this instead. */}
     <button type="button" className="sr-only" tabIndex={-1} onClick={() => onPreview(item, slot)}>
@@ -374,7 +416,7 @@ function Lightbox({
           (item.kind === 'photo' ? (
             <img src={url} alt="A photo in your bunch" decoding="async" onClick={closeFromBackdrop} onError={() => setBroken(true)} />
           ) : (
-            <video src={url} autoPlay loop muted playsInline onClick={(event) => event.stopPropagation()} onError={() => setBroken(true)} />
+            <HubVideo src={url} playing loop muted onClick={(event) => event.stopPropagation()} onError={() => setBroken(true)} />
           ))
         )}
       </div>

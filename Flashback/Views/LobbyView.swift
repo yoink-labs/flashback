@@ -67,7 +67,7 @@ struct LobbyView: View {
         }
         #if DEBUG
         .onAppear {
-            if TipDebugLaunch.value("uiRoute") == "settings" { showSettings = true }
+            if ["settings", "settingsEffects"].contains(TipDebugLaunch.value("uiRoute")) { showSettings = true }
         }
         #endif
     }
@@ -78,25 +78,38 @@ struct LobbyView: View {
         GeometryReader { proxy in
             let pad = layout.pagePadding
             let content = min(proxy.size.width, layout.contentWidth ?? .infinity) - pad * 2
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    codeBlock(centered: true)
-                    playerStrip
-                    bunchSection(metrics: .filling(width: content, columns: layout.bunchColumns(kind), count: DeckState.size(kind)))
-                    settingsRow
-                }
-                .padding(.horizontal, pad)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
-                .frame(maxWidth: layout.contentWidth)
-                .frame(maxWidth: .infinity)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                stickyBar
+            ScrollViewReader { scroller in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        codeBlock(centered: true)
+                        playerStrip
+                        bunchSection(metrics: .filling(width: content, columns: layout.bunchColumns(kind), count: deck.requiredSize(kind)))
+                        settingsBlock
+                            .id("lobby-settings")
+                    }
                     .padding(.horizontal, pad)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
                     .frame(maxWidth: layout.contentWidth)
                     .frame(maxWidth: .infinity)
-                    .background(Palette.bg)
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    stickyBar
+                        .padding(.horizontal, pad)
+                        .frame(maxWidth: layout.contentWidth)
+                        .frame(maxWidth: .infinity)
+                        .background(Palette.bg)
+                }
+                #if DEBUG
+                // The folded lobby is long; this fixture opens it at the chips.
+                .onAppear {
+                    guard TipDebugLaunch.value("uiRoute") == "lobbyChips" else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(400))
+                        scroller.scrollTo("lobby-settings", anchor: .bottom)
+                    }
+                }
+                #endif
             }
         }
     }
@@ -114,7 +127,7 @@ struct LobbyView: View {
                     VStack(alignment: .leading, spacing: 24) {
                         codeBlock(centered: false)
                         playerList
-                        settingsRow
+                        settingsBlock
                     }
                     .padding(.top, 20)
                     .padding(.bottom, 20)
@@ -135,11 +148,11 @@ struct LobbyView: View {
         if isMix { reserved += BunchSteps.height + Self.sectionSpacing }
         if deck.state.shortfall(kind) != nil || deck.note(kind) != nil { reserved += BunchNote.reservedHeight + Self.sectionSpacing }
         let gridHeight = size.height - reserved
-        let metrics = BunchGridMetrics.fitting(width: width, height: gridHeight, count: DeckState.size(kind))
+        let metrics = BunchGridMetrics.fitting(width: width, height: gridHeight, count: deck.requiredSize(kind))
         // In Mix the column keeps the widest step's width, so the step switch
         // doesn't change size when moving between Photos and Videos.
         let columnWidth = deck.kinds
-            .map { BunchGridMetrics.fitting(width: width, height: gridHeight, count: DeckState.size($0)).width }
+            .map { BunchGridMetrics.fitting(width: width, height: gridHeight, count: deck.requiredSize($0)).width }
             .max() ?? metrics.width
         return bunchSection(metrics: metrics)
             .frame(width: max(columnWidth, min(width, 320)))
@@ -244,7 +257,15 @@ struct LobbyView: View {
         .accessibilityLabel("Invite a player")
     }
 
-    // MARK: - Settings row
+    // MARK: - Settings row and chips
+
+    /// The settings summary with the enabled-feature chips underneath (§9).
+    private var settingsBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            settingsRow
+            SettingsChipRow(settings: view.settings)
+        }
+    }
 
     private var settingsRow: some View {
         Group {
@@ -288,8 +309,8 @@ struct LobbyView: View {
     /// Mix, photos dealt, videos not yet: the next step is the primary action.
     private var showsNextStep: Bool {
         isMix && kind == .photo
-            && deck.bunch(.photo).items.count >= DeckState.photoSize
-            && deck.bunch(.video).items.count < DeckState.videoSize
+            && deck.bunch(.photo).items.count >= deck.requiredSize(.photo)
+            && deck.bunch(.video).items.count < deck.requiredSize(.video)
     }
 
     /// The divider, the caption and the button share one content width, inside
@@ -339,7 +360,7 @@ struct LobbyView: View {
 
     /// A complete bunch that is not mid-deal or mid-swap.
     private var deckFits: Bool {
-        deck.counts(mode: mode).fits(mode) && !deck.isBusy
+        deck.fits(mode) && !deck.isBusy
     }
 
     @ViewBuilder private var readyButton: some View {

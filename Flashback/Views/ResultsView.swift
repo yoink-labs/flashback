@@ -21,17 +21,20 @@ struct ResultsView: View {
     private var compact: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(spacing: 20) {
+                VStack(spacing: 14) {
                     if let result {
                         header(result, media: true)
                         youSummary(result)
+                        if let shop = view.activeShop, shop.open, !view.isFinalResult {
+                            ShopStrip(player: view.me, shop: shop, lastBought: room.lastBought, paused: view.paused)
+                        }
                         list(result)
                     } else {
                         ProgressView().tint(Palette.text2).padding(40)
                     }
                 }
                 .padding(.horizontal, layout.pagePadding)
-                .padding(.top, 20)
+                .padding(.top, 12)
                 .padding(.bottom, 24)
                 .frame(maxWidth: layout == .compact ? 560 : 640)
                 .frame(maxWidth: .infinity)
@@ -59,6 +62,9 @@ struct ResultsView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         youSummary(result)
+                        if let shop = view.activeShop, shop.open, !view.isFinalResult {
+                            ShopStrip(player: view.me, shop: shop, lastBought: room.lastBought, paused: view.paused)
+                        }
                         list(result)
                     }
                     .padding(.vertical, 20)
@@ -75,7 +81,7 @@ struct ResultsView: View {
     private func header(_ result: RoundResult, media: Bool) -> some View {
         let ownerColor = Palette.playerColor(view.colorIndex(result.ownerID))
         let outcome = outcome(result)
-        return VStack(spacing: 10) {
+        return VStack(spacing: 6) {
             PlayerAvatar(view: view, playerID: result.ownerID, size: media ? 88 : 56, ring: Palette.gold)
 
             (Text("It was ")
@@ -104,10 +110,10 @@ struct ResultsView: View {
 
             if media {
                 mediaView(result.kind, fill: true)
-                    .frame(width: 140, height: 140)
+                    .frame(width: 96, height: 96)
                     .clipShape(RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
-                    .overlay(alignment: .bottomTrailing) { SaveMediaButton().padding(6) }
-                    .padding(.top, 6)
+                    .overlay(alignment: .bottomTrailing) { SaveMediaButton().padding(4) }
+                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity)
@@ -115,24 +121,63 @@ struct ResultsView: View {
 
     // MARK: - You
 
-    /// One line of big numbers with small captions: rank, this round, movement, total.
+    /// One line of big numbers with small captions: rank, this round, movement,
+    /// total — plus the Milestone 4 breakdown lines under the points (§7).
     @ViewBuilder private func youSummary(_ result: RoundResult) -> some View {
         let standings = Scoring.Standings.rows(players: view.players, result: result)
         if let mine = standings.first(where: { $0.id == view.you.id }) {
             let guess = result.rows.first { $0.playerID == view.you.id }
             let isOwner = result.ownerID == view.you.id
             let points = isOwner ? 0 : (guess?.points ?? 0)
-            HStack(alignment: .top, spacing: 0) {
-                stat(Self.ordinal(mine.rank), caption: "Rank of \(standings.count)", color: mine.rank == 1 ? Palette.gold : Palette.text)
-                stat(points > 0 ? "+\(points)" : "No points", caption: "This round", color: points > 0 ? Palette.good : Palette.text2, small: points == 0)
-                stat(movementText(mine.movement), caption: mine.movement == 0 ? "Held" : "Moved", color: mine.movement > 0 ? Palette.good : mine.movement < 0 ? Palette.bad : Palette.text2, small: mine.movement == 0)
-                stat(mine.score.formatted(), caption: "Total", color: Palette.text)
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
+                    stat(Self.ordinal(mine.rank), caption: "Rank of \(standings.count)", color: mine.rank == 1 ? Palette.gold : Palette.text)
+                    stat(pointsText(points), caption: "This round", color: pointsColor(points), small: points == 0)
+                    stat(movementText(mine.movement), caption: mine.movement == 0 ? "Held" : "Moved", color: mine.movement > 0 ? Palette.good : mine.movement < 0 ? Palette.bad : Palette.text2, small: mine.movement == 0)
+                    stat(mine.score.formatted(), caption: "Total", color: Palette.text)
+                }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 8)
+
+                if let guess {
+                    let lines = ResultBreakdown.lines(for: guess)
+                    if !lines.isEmpty {
+                        Rectangle().fill(Palette.line).frame(height: 1).padding(.horizontal, 12)
+                        VStack(spacing: 3) {
+                            ForEach(lines) { line in
+                                Text(line.text)
+                                    .font(.fl(13, .semibold))
+                                    .foregroundStyle(lineColor(line.tone))
+                            }
+                        }
+                        .padding(.vertical, 10)
+                        .accessibilityIdentifier("you-breakdown")
+                    }
+                }
             }
-            .padding(.vertical, 14)
-            .padding(.horizontal, 8)
             .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("you-summary")
+        }
+    }
+
+    private func pointsText(_ points: Int) -> String {
+        if points > 0 { return "+\(points)" }
+        if points < 0 { return "−\(-points)" }
+        return "No points"
+    }
+
+    private func pointsColor(_ points: Int) -> Color {
+        if points > 0 { return Palette.good }
+        if points < 0 { return Palette.bad }
+        return Palette.text2
+    }
+
+    private func lineColor(_ tone: BreakdownLine.Tone) -> Color {
+        switch tone {
+        case .good: return Palette.good
+        case .bad: return Palette.bad
+        case .neutral: return Palette.text2
         }
     }
 
@@ -208,7 +253,7 @@ struct ResultsView: View {
     @ViewBuilder private func mediaView(_ kind: MediaKind, fill: Bool) -> some View {
         ZStack {
             fill ? Palette.surface2 : Palette.surface
-            if kind == .video, playback.player != nil {
+            if kind == .video, playback.isLoaded {
                 PlayerLayerView(player: playback.player, gravity: fill ? .resizeAspectFill : .resizeAspect)
             } else if let image = room.revealImage {
                 Color.clear.overlay {
@@ -261,6 +306,7 @@ struct ResultsView: View {
         let isOwner = row.id == owner
         let correct = row.guess?.correct == true
         let isYou = row.id == view.you.id
+        let points = row.guess?.points ?? 0
         return HStack(spacing: 6) {
             Text("\(row.rank)")
                 .font(.fl(15, .bold))
@@ -276,6 +322,10 @@ struct ResultsView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
 
+            if let player = view.player(row.id), player.items.hasAny {
+                ItemIcons(items: player.items, iconSize: 9)
+            }
+
             Spacer(minLength: 0)
 
             if isOwner {
@@ -286,13 +336,13 @@ struct ResultsView: View {
                 Color.clear.frame(width: 36, height: 1)
             } else {
                 target(row, correct: correct)
-                Text((row.guess?.points ?? 0) > 0 ? "+\(row.guess?.points ?? 0)" : "")
+                Text(points == 0 ? "" : points > 0 ? "+\(points)" : "−\(-points)")
                     .font(.fl(15, .bold))
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                    .foregroundStyle(Palette.good)
-                    .frame(width: 40, alignment: .trailing)
+                    .foregroundStyle(points >= 0 ? Palette.good : Palette.bad)
+                    .frame(width: 44, alignment: .trailing)
             }
 
             Text(row.score.formatted())
@@ -338,7 +388,7 @@ struct ResultsView: View {
     private var actions: some View {
         VStack(spacing: 10) {
             TimelineView(.periodic(from: .now, by: 0.1)) { _ in
-                let total = max(1000, Double(view.settings.breakSeconds) * 1000)
+                let total = max(1000, Double(view.resultsBreakSeconds) * 1000)
                 let left = view.remainingMs(until: view.phaseEndsAt, now: room.serverNow)
                 let fraction = min(1, max(0, left / total))
                 VStack(spacing: 8) {

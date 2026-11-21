@@ -59,11 +59,21 @@ struct Toast: Equatable, Identifiable {
     /// The media showing in this reveal / results, kept so it can be saved.
     private(set) var savable: MediaBlob?
 
+    /// A deck video playing inline under a pointer (hover), if any (§8).
+    @Published private(set) var hoverItemID: String?
+    private var hoverWork: Task<Void, Never>?
+
+    /// The item this device bought in the open break, for the shop cards'
+    /// "Bought ✓" / "One per break" captions (§6).
+    @Published private(set) var lastBought: ShopItem?
+
     /// One processed item per kind held ready; the turn upload uses it at once.
     /// In Mix both kinds are kept warm, since the server says which kind a round is.
     private var prepared: [MediaKind: PreparedItem] = [:]
     private var work: Task<Void, Never>?
     private var lastSentDeck: DeckCount?
+    /// The temporary file written for the reveal clip, deleted when it ends.
+    private var revealFile: URL?
 
     static let muteDefaultsKey = "flashback.revealMuted"
 
@@ -135,6 +145,8 @@ struct Toast: Equatable, Identifiable {
         needMediaSent.removeAll()
         roomInfo = nil
         previewError = nil
+        stopHover()
+        playback.stop()
         deck.resetForNewRoom()
         connect()
     }
@@ -165,6 +177,8 @@ struct Toast: Equatable, Identifiable {
         if let code = session?.code { vault.remove(code: code) }
         disconnect()
         clearReveal()
+        stopHover()
+        playback.stop()
         media.removeAll()
         needMediaSent.removeAll()
         prepared.removeAll()
@@ -282,6 +296,7 @@ struct Toast: Equatable, Identifiable {
         case "error":
             // Errors from background messages (turn passes, deck counts, media
             // re-requests) must never show: only the round's owner could get them.
+            if message.request == "buy" { lastBought = nil }
             if !["pass", "deck", "needMedia"].contains(message.request ?? "") { error = message.message }
         case "session":
             guard var session, let token = message.token, let expiresAt = message.expiresAt else { return }
@@ -306,15 +321,20 @@ struct Toast: Equatable, Identifiable {
         media[key] = MediaBlob(kind: frame.header.kind, bytes: frame.bytes)
         if let view, view.phase == .reveal, view.game == key.game, view.round?.index == key.round {
             showReveal(key, kind: frame.header.kind)
+            syncPlayback()
         }
     }
 
     func apply(_ state: RoomView) {
         let old = view
         view = state
-        deck.configure(state.settings)
+        // The "Bought ✓" caption belongs to the open break; a pause keeps it.
+        if state.phase != .results { lastBought = nil }
+        deck.configure(state.settings, bunch: state.bunch)
         haptics(from: old, to: state)
         sendDeckIfNeeded(force: lastSentDeck == nil)
+
+        if state.phase != .lobby { stopHover() }
 
         switch state.phase {
         case .reveal:
@@ -357,8 +377,10 @@ struct Toast: Equatable, Identifiable {
         prepared = prepared.filter { isCurrent($0.value) }
     }
 
-    /// The clip plays only in an unpaused reveal; results and a pause hold its frame.
+    /// The clip plays only in an unpaused reveal; results and a pause hold its
+    /// frame. Other purposes (deck preview, hover) are never touched.
     private func syncPlayback() {
+        guard playback.clip?.purpose == .reveal else { return }
         if view?.phase == .reveal && view?.paused == false { playback.resume() } else { playback.pause() }
     }
 
@@ -508,7 +530,9 @@ struct Toast: Equatable, Identifiable {
 
     // MARK: - Reveal media
 
-    private var hasMedia: Bool { revealImage != nil || playback.player != nil }
+    private var hasMedia: Bool {
+        revealImage != nil || (playback.clip?.purpose == .reveal && playback.isLoaded)
+    }
 
     private func showReveal(_ key: MediaKey, kind: MediaKind?) {
         if showingKey == key {
@@ -548,7 +572,9 @@ struct Toast: Equatable, Identifiable {
                 revealFailed = true
                 return
             }
-            playback.play(file: url)
+            revealFile = url
+            // The one shared player (§8); the reveal is the clip's purpose.
+            playback.play(file: url, loop: true, purpose: .reveal, id: "reveal-\(showingKey?.round ?? 0)")
             syncPlayback()
         }
     }
@@ -558,7 +584,76 @@ struct Toast: Equatable, Identifiable {
         savable = nil
         revealImage = nil
         revealFailed = false
-        playback.stop()
+        playback.stop(purpose: .reveal)
+        if let revealFile {
+            try? FileManager.default.removeItem(at: revealFile)
+            self.revealFile = nil
+        }
+    }
+
+    // MARK: - Inline deck preview (shared player, §8)
+
+    /// Hovering a video tile for 250 ms plays it inline, muted, on a pointer
+    /// device. Leaving stops it. Never touches a reveal or the full preview.
+    func beginHoverPreview(_ item: DeckItem) {
+        guard item.kind == .video, session != nil else { return }
+        stopHover()
+        hoverItemID = item.id
+        hoverWork = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self, !Task.isCancelled, self.hoverItemID == item.id else { return }
+            guard let playerItem = await self.deck.playerItem(for: item) else { return }
+            guard !Task.isCancelled, self.hoverItemID == item.id else { return }
+            self.playback.play(playerItem, loop: true, forcedMuted: true, purpose: .hover, id: item.id)
+        }
+    }
+
+    func endHoverPreview(_ id: String) {
+        guard hoverItemID == id else { return }
+        stopHover()
+    }
+
+    private func stopHover() {
+        hoverWork?.cancel()
+        hoverWork = nil
+        hoverItemID = nil
+        playback.stop(purpose: .hover)
+    }
+
+    // MARK: - Power-ups (§5, §6)
+
+    /// A 50/50 can be used before guessing in an unpaused reveal, with a charge
+    /// in hand and not already used this round. The wrong-choice pool excludes
+    /// the owner and the viewer; the owner is hidden until results, so the
+    /// client applies the stricter non-owner rule (4+ players).
+    var canUseFiftyFifty: Bool {
+        guard let view, view.phase == .reveal, !view.paused, view.canGuess else { return false }
+        guard (view.me?.items.fiftyFifty ?? 0) > 0 else { return false }
+        guard view.round?.yourGuess == nil else { return false }
+        guard view.round?.eliminated.isEmpty != false else { return false }
+        return FiftyFiftyRules.canCut(players: view.players.count, isOwner: false)
+    }
+
+    func useFiftyFifty() {
+        guard canUseFiftyFifty else {
+            Haptics.denied()
+            return
+        }
+        Haptics.tick()
+        send(.useFiftyFifty)
+    }
+
+    /// Buys one shop item. The server owns the price, the score, and the
+    /// once-per-break rule; the disabled cards never reach here.
+    func buy(_ item: ShopItem) {
+        guard let view, let shop = view.activeShop, shop.open, !shop.bought, !view.paused else { return }
+        guard ShopAvailability.evaluate(item: item, player: view.me, shop: shop) == .available else {
+            Haptics.denied()
+            return
+        }
+        lastBought = item
+        Haptics.tick()
+        send(.buy(item))
     }
 
     // MARK: - Host controls

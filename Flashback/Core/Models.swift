@@ -92,23 +92,47 @@ struct RoomSettings: Codable, Equatable {
     var breakSeconds: Int
     /// Swaps each player gets per bunch, 0–10.
     var swaps: Int
+    /// Every bunch is sized so every photo gets shown (Milestone 4 §2).
+    var evenSplit: Bool
+    var effects: EffectsSettings
+    var powerups: PowerupSettings
 
-    init(rounds: Int = 10, timerSeconds: Int = 20, mediaMode: MediaMode = .both, breakSeconds: Int = 7, swaps: Int = 3) {
+    init(
+        rounds: Int = 10,
+        timerSeconds: Int = 20,
+        mediaMode: MediaMode = .both,
+        breakSeconds: Int = 7,
+        swaps: Int = 3,
+        evenSplit: Bool = false,
+        effects: EffectsSettings = .defaults,
+        powerups: PowerupSettings = .defaults
+    ) {
         self.rounds = rounds
         self.timerSeconds = timerSeconds
         self.mediaMode = mediaMode
         self.breakSeconds = breakSeconds
         self.swaps = swaps
+        self.evenSplit = evenSplit
+        self.effects = effects
+        self.powerups = powerups
     }
 
     static let defaults = RoomSettings()
 
-    /// Settings sheet ranges and quick picks (docs/MILESTONE3.md section 2).
-    static let roundsRange = 1...30
-    static let roundChips = [5, 10, 15, 20]
+    /// Settings sheet ranges and quick picks (docs/MILESTONE4.md §9).
+    static let roundsRange = 1...100
+    static let roundChips = [5, 10, 20, 30, 50, 100]
     static let timerChips = [10, 15, 20, 30, 45, 60]
-    static let breakChips = [3, 5, 7, 10, 15]
+    static let breakChips = [3, 5, 7, 10, 15, 20, 30]
     static let swapChips = [0, 1, 3, 5]
+
+    /// When the shop is on, the break lasts at least this long (§6).
+    static let shopMinBreakSeconds = 12
+
+    /// The length of the shop-enabled break, for captions and progress bars.
+    var effectiveBreakSeconds: Int {
+        powerups.shop.enabled ? max(breakSeconds, Self.shopMinBreakSeconds) : breakSeconds
+    }
 
     /// The lobby settings row: `Mix · 10 rounds · 20s`.
     var summary: String { "\(mediaMode.label) · \(Self.roundsLabel(rounds)) · \(timerSeconds)s" }
@@ -116,9 +140,12 @@ struct RoomSettings: Codable, Equatable {
     /// "1 round" / "3 rounds".
     static func roundsLabel(_ rounds: Int) -> String { rounds == 1 ? "1 round" : "\(rounds) rounds" }
 
-    private enum CodingKeys: String, CodingKey { case rounds, timerSeconds, mediaMode, breakSeconds, swaps }
+    private enum CodingKeys: String, CodingKey {
+        case rounds, timerSeconds, mediaMode, breakSeconds, swaps, evenSplit, effects, powerups
+    }
 
-    /// Older servers send no `breakSeconds` / `swaps`: those decode as the defaults.
+    /// Older servers send none of the Milestone 4 keys, or only some of them:
+    /// every one decodes as its default.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = RoomSettings()
@@ -127,6 +154,9 @@ struct RoomSettings: Codable, Equatable {
         mediaMode = try c.decodeIfPresent(MediaMode.self, forKey: .mediaMode) ?? d.mediaMode
         breakSeconds = try c.decodeIfPresent(Int.self, forKey: .breakSeconds) ?? d.breakSeconds
         swaps = try c.decodeIfPresent(Int.self, forKey: .swaps) ?? d.swaps
+        evenSplit = (try? c.decodeIfPresent(Bool.self, forKey: .evenSplit)) ?? d.evenSplit
+        effects = (try? c.decodeIfPresent(EffectsSettings.self, forKey: .effects)) ?? d.effects
+        powerups = (try? c.decodeIfPresent(PowerupSettings.self, forKey: .powerups)) ?? d.powerups
     }
 }
 
@@ -140,6 +170,8 @@ struct PlayerView: Codable, Equatable, Identifiable {
     var score: Int
     var streak: Int
     var deck: DeckCount
+    /// Public shop items (Milestone 4 §6); shown as small icons by the avatar.
+    var items: PlayerItems
 
     init(
         id: String,
@@ -150,7 +182,8 @@ struct PlayerView: Codable, Equatable, Identifiable {
         connected: Bool = true,
         score: Int = 0,
         streak: Int = 0,
-        deck: DeckCount = .zero
+        deck: DeckCount = .zero,
+        items: PlayerItems = .none
     ) {
         self.id = id
         self.nickname = nickname
@@ -161,10 +194,11 @@ struct PlayerView: Codable, Equatable, Identifiable {
         self.score = score
         self.streak = streak
         self.deck = deck
+        self.items = items
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, nickname, signedIn, isHost, ready, connected, score, streak, deck
+        case id, nickname, signedIn, isHost, ready, connected, score, streak, deck, items
     }
 
     init(from decoder: Decoder) throws {
@@ -178,11 +212,13 @@ struct PlayerView: Codable, Equatable, Identifiable {
         score = try c.decodeIfPresent(Int.self, forKey: .score) ?? 0
         streak = try c.decodeIfPresent(Int.self, forKey: .streak) ?? 0
         deck = try c.decodeIfPresent(DeckCount.self, forKey: .deck) ?? .zero
+        items = try c.decodeIfPresent(PlayerItems.self, forKey: .items) ?? .none
     }
 }
 
 /// `countdown`: `{ index, total, waiting }`.
-/// `reveal`: `{ index, total, kind, revealAt, endsAt, canGuess, yourGuess, guessedCount, guesserCount }`.
+/// `reveal`: `{ index, total, kind, revealAt, endsAt, canGuess, yourGuess, guessedCount, guesserCount }`
+/// plus the Milestone 4 viewer-only fields: `yourEffect`, `eliminated`.
 struct RoundView: Codable, Equatable {
     var index: Int
     var total: Int
@@ -194,6 +230,15 @@ struct RoundView: Codable, Equatable {
     var yourGuess: String?
     var guessedCount: Int?
     var guesserCount: Int?
+    /// The viewer's private streak effect on this reveal (§3).
+    var yourEffect: YourEffect?
+    /// The shared focus/zoom-out effect (§4).
+    var effect: RoundEffect?
+    /// Wrong choices greyed out by the viewer's 50/50 (§5); empty when unused.
+    var eliminated: [String]
+    /// The shop strip's state, if the server puts it on the round rather than
+    /// on the view (§6).
+    var shop: ShopView?
 
     init(
         index: Int = 1,
@@ -205,7 +250,11 @@ struct RoundView: Codable, Equatable {
         canGuess: Bool? = nil,
         yourGuess: String? = nil,
         guessedCount: Int? = nil,
-        guesserCount: Int? = nil
+        guesserCount: Int? = nil,
+        yourEffect: YourEffect? = nil,
+        effect: RoundEffect? = nil,
+        eliminated: [String] = [],
+        shop: ShopView? = nil
     ) {
         self.index = index
         self.total = total
@@ -217,16 +266,46 @@ struct RoundView: Codable, Equatable {
         self.yourGuess = yourGuess
         self.guessedCount = guessedCount
         self.guesserCount = guesserCount
+        self.yourEffect = yourEffect
+        self.effect = effect
+        self.eliminated = eliminated
+        self.shop = shop
     }
 
     /// True while the server is still waiting for the owner's upload.
     var isWaiting: Bool { waiting == true }
+
+    private enum CodingKeys: String, CodingKey {
+        case index, total, waiting, kind, revealAt, endsAt, canGuess, yourGuess
+        case guessedCount, guesserCount, yourEffect, effect, eliminated, shop
+    }
+
+    /// Old servers send none of the Milestone 4 fields.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        index = try c.decodeIfPresent(Int.self, forKey: .index) ?? 1
+        total = try c.decodeIfPresent(Int.self, forKey: .total) ?? 1
+        waiting = try c.decodeIfPresent(Bool.self, forKey: .waiting)
+        kind = try c.decodeIfPresent(MediaKind.self, forKey: .kind)
+        revealAt = try c.decodeIfPresent(Double.self, forKey: .revealAt)
+        endsAt = try c.decodeIfPresent(Double.self, forKey: .endsAt)
+        canGuess = try c.decodeIfPresent(Bool.self, forKey: .canGuess)
+        yourGuess = try c.decodeIfPresent(String.self, forKey: .yourGuess)
+        guessedCount = try c.decodeIfPresent(Int.self, forKey: .guessedCount)
+        guesserCount = try c.decodeIfPresent(Int.self, forKey: .guesserCount)
+        yourEffect = try? c.decodeIfPresent(YourEffect.self, forKey: .yourEffect)
+        effect = try? c.decodeIfPresent(RoundEffect.self, forKey: .effect)
+        eliminated = (try? c.decodeIfPresent([String].self, forKey: .eliminated)) ?? []
+        shop = try? c.decodeIfPresent(ShopView.self, forKey: .shop)
+    }
 }
 
 struct ResultRow: Codable, Equatable, Identifiable {
     var playerID: String
     var targetID: String?
     var correct: Bool
+    /// The signed delta actually applied to the score (§7): can be negative
+    /// for a lost Double Down.
     var points: Int
     var accuracy: Int
     var speed: Int
@@ -234,7 +313,45 @@ struct ResultRow: Codable, Equatable, Identifiable {
     var streak: Int
     var elapsedMs: Double?
     var total: Int
+    /// Milestone 4 breakdown fields.
+    var bonus: Int = 0
+    var doubleDown: DoubleDownOutcome?
+    var shielded: Bool = false
+    var effect: StreakEffectKind?
+    var roundEffect: RoundEffectKind?
+    var fiftyFifty: Bool = false
+    var earnedFiftyFifty: Bool = false
     var id: String { playerID }
+}
+
+extension ResultRow {
+    private enum CodingKeys: String, CodingKey {
+        case playerID, targetID, correct, points, accuracy, speed, streakBonus, streak, elapsedMs, total
+        case bonus, doubleDown, shielded, effect, roundEffect, fiftyFifty, earnedFiftyFifty
+    }
+
+    /// Every Milestone 4 field is optional or defaulted, so old result rows
+    /// decode exactly as before.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        playerID = try c.decode(String.self, forKey: .playerID)
+        targetID = try c.decodeIfPresent(String.self, forKey: .targetID)
+        correct = try c.decodeIfPresent(Bool.self, forKey: .correct) ?? false
+        points = try c.decodeIfPresent(Int.self, forKey: .points) ?? 0
+        accuracy = try c.decodeIfPresent(Int.self, forKey: .accuracy) ?? 0
+        speed = try c.decodeIfPresent(Int.self, forKey: .speed) ?? 0
+        streakBonus = try c.decodeIfPresent(Int.self, forKey: .streakBonus) ?? 0
+        streak = try c.decodeIfPresent(Int.self, forKey: .streak) ?? 0
+        elapsedMs = try c.decodeIfPresent(Double.self, forKey: .elapsedMs)
+        total = try c.decodeIfPresent(Int.self, forKey: .total) ?? 0
+        bonus = (try? c.decodeIfPresent(Int.self, forKey: .bonus)) ?? 0
+        doubleDown = try? c.decodeIfPresent(DoubleDownOutcome.self, forKey: .doubleDown)
+        shielded = (try? c.decodeIfPresent(Bool.self, forKey: .shielded)) ?? false
+        effect = try? c.decodeIfPresent(StreakEffectKind.self, forKey: .effect)
+        roundEffect = try? c.decodeIfPresent(RoundEffectKind.self, forKey: .roundEffect)
+        fiftyFifty = (try? c.decodeIfPresent(Bool.self, forKey: .fiftyFifty)) ?? false
+        earnedFiftyFifty = (try? c.decodeIfPresent(Bool.self, forKey: .earnedFiftyFifty)) ?? false
+    }
 }
 
 struct RoundResult: Codable, Equatable {
@@ -277,8 +394,17 @@ struct RoomView: Codable, Equatable {
     var paused: Bool = false
     /// Time that was left in the phase when it was paused (nil: no deadline).
     var pausedRemainingMs: Double?
+    /// The room's bunch sizes (Milestone 4 §2); old servers mean Milestone 3 sizes.
+    var bunch: BunchRequirement = .defaults
+    /// The shop strip's state in results (§6). The server may send it on the
+    /// view or on the round; `activeShop` reads either.
+    var shop: ShopView?
 
     var me: PlayerView? { players.first { $0.id == you.id } }
+
+    /// The shop state for this results screen, from either place the server may
+    /// put it.
+    var activeShop: ShopView? { shop ?? round?.shop }
 
     /// Milliseconds left until `end`, frozen at `pausedRemainingMs` while paused.
     func remainingMs(until end: Double?, now: Double) -> Double {
@@ -304,6 +430,12 @@ struct RoomView: Codable, Equatable {
         return index >= (round?.total ?? settings.rounds)
     }
 
+    /// How long this results phase lasts. The shop extends regular breaks to at
+    /// least 12 s, but the final results use plain `breakSeconds` (§6).
+    var resultsBreakSeconds: Int {
+        isFinalResult ? settings.breakSeconds : settings.effectiveBreakSeconds
+    }
+
     func name(_ id: String?) -> String {
         players.first { $0.id == id }?.nickname ?? "Someone who left"
     }
@@ -321,10 +453,11 @@ struct RoomView: Codable, Equatable {
 extension RoomView {
     private enum CodingKeys: String, CodingKey {
         case code, phase, game, hostID, capacity, settings, serverNow, phaseEndsAt, startBlocker
-        case players, you, round, lastResult, podium, paused, pausedRemainingMs
+        case players, you, round, lastResult, podium, paused, pausedRemainingMs, bunch, shop
     }
 
-    /// `paused` / `pausedRemainingMs` are new in Milestone 3; older servers omit them.
+    /// `paused` / `pausedRemainingMs` are new in Milestone 3; `bunch`, `shop`
+    /// and the round's effects are new in Milestone 4. Older servers omit them.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         code = try c.decode(String.self, forKey: .code)
@@ -343,6 +476,8 @@ extension RoomView {
         podium = try c.decodeIfPresent([PodiumEntry].self, forKey: .podium) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         pausedRemainingMs = try c.decodeIfPresent(Double.self, forKey: .pausedRemainingMs)
+        bunch = (try? c.decodeIfPresent(BunchRequirement.self, forKey: .bunch)) ?? .defaults
+        shop = try? c.decodeIfPresent(ShopView.self, forKey: .shop)
     }
 }
 
@@ -411,15 +546,27 @@ struct MediaBlob: Equatable {
 /// Messages the client sends. `auth.<token>` is a WebSocket subprotocol, not a message.
 enum ClientMessage: Encodable {
     case ready(Bool)
-    case settings(rounds: Int? = nil, timerSeconds: Int? = nil, mediaMode: MediaMode? = nil, breakSeconds: Int? = nil, swaps: Int? = nil)
+    case settings(
+        rounds: Int? = nil,
+        timerSeconds: Int? = nil,
+        mediaMode: MediaMode? = nil,
+        breakSeconds: Int? = nil,
+        swaps: Int? = nil,
+        evenSplit: Bool? = nil,
+        effects: EffectsSettings? = nil,
+        powerups: PowerupSettings? = nil
+    )
     case start, advance, end, playAgain, leave, ping, pause, resume
     case guess(String)
     case deck(DeckCount)
     case pass(String)
     case needMedia(Int)
+    case useFiftyFifty
+    case buy(ShopItem)
 
     private enum Key: String, CodingKey {
-        case type, ready, rounds, timerSeconds, mediaMode, breakSeconds, swaps, targetID, photos, videos, slot, round
+        case type, ready, rounds, timerSeconds, mediaMode, breakSeconds, swaps, evenSplit, effects, powerups
+        case targetID, photos, videos, slot, round, item
     }
 
     var isPing: Bool {
@@ -433,13 +580,18 @@ enum ClientMessage: Encodable {
         case .ready(let ready):
             try c.encode("ready", forKey: .type)
             try c.encode(ready, forKey: .ready)
-        case .settings(let rounds, let timer, let mode, let breakSeconds, let swaps):
+        case .settings(let rounds, let timer, let mode, let breakSeconds, let swaps, let evenSplit, let effects, let powerups):
             try c.encode("settings", forKey: .type)
             try c.encodeIfPresent(rounds, forKey: .rounds)
             try c.encodeIfPresent(timer, forKey: .timerSeconds)
             try c.encodeIfPresent(mode, forKey: .mediaMode)
             try c.encodeIfPresent(breakSeconds, forKey: .breakSeconds)
             try c.encodeIfPresent(swaps, forKey: .swaps)
+            try c.encodeIfPresent(evenSplit, forKey: .evenSplit)
+            // `effects` and `powerups` go whole; the server validates and
+            // replaces the object (§1).
+            try c.encodeIfPresent(effects, forKey: .effects)
+            try c.encodeIfPresent(powerups, forKey: .powerups)
         case .start: try c.encode("start", forKey: .type)
         case .advance: try c.encode("advance", forKey: .type)
         case .end: try c.encode("end", forKey: .type)
@@ -461,6 +613,11 @@ enum ClientMessage: Encodable {
         case .needMedia(let round):
             try c.encode("needMedia", forKey: .type)
             try c.encode(round, forKey: .round)
+        case .useFiftyFifty:
+            try c.encode("useFiftyFifty", forKey: .type)
+        case .buy(let item):
+            try c.encode("buy", forKey: .type)
+            try c.encode(item.rawValue, forKey: .item)
         }
     }
 }

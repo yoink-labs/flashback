@@ -12,13 +12,13 @@ import {
   MEDIA_SETTLE_MS,
   newRoom,
   PAUSE_MAX_MS,
-  ROUNDS,
   SWAPS,
   UPLOAD_TIMEOUT_MS,
   type RoomState,
 } from '../src/game';
 import { PHOTO_BUNCH, VIDEO_BUNCH } from '../src/bunch';
 import type { MediaKind } from '../src/media';
+import { defaultSettings } from '../src/settings';
 import { sequenceRandom } from './helpers';
 
 const T0 = 1_000_000;
@@ -187,17 +187,17 @@ describe('decks, ready, and start rules', () => {
     for (const mediaMode of ['movie', null, 3, {}]) {
       expect(errStatus(() => game.updateSettings(ids[0], { mediaMode }, T0)), String(mediaMode)).toBe(422);
     }
-    expect(game.state.settings).toEqual({ rounds: 10, timerSeconds: 20, mediaMode: 'both', breakSeconds: 7, swaps: 3 });
+    expect(game.state.settings).toEqual(defaultSettings());
   });
 
-  it('validates host settings and uses the M3 defaults', () => {
+  it('validates host settings and uses the defaults', () => {
     const { game, ids } = lobby();
-    expect(game.state.settings).toEqual({ rounds: ROUNDS.default, timerSeconds: 20, mediaMode: 'both', breakSeconds: BREAK_SECONDS.default, swaps: SWAPS.default });
+    expect(game.state.settings).toEqual(defaultSettings());
     game.updateSettings(ids[0], { rounds: 3, timerSeconds: 15, mediaMode: 'videos', breakSeconds: 5, swaps: 1 }, T0);
-    expect(game.state.settings).toEqual({ rounds: 3, timerSeconds: 15, mediaMode: 'videos', breakSeconds: 5, swaps: 1 });
+    expect(game.state.settings).toEqual({ ...defaultSettings(), rounds: 3, timerSeconds: 15, mediaMode: 'videos', breakSeconds: 5, swaps: 1 });
     expect(err(() => game.updateSettings(ids[1], { rounds: 4 }, T0))).toMatch(/Only the host/);
     expect(err(() => game.updateSettings(ids[0], { rounds: 0 }, T0))).toMatch(/Rounds must be/);
-    expect(err(() => game.updateSettings(ids[0], { rounds: 31 }, T0))).toMatch(/Rounds must be/);
+    expect(err(() => game.updateSettings(ids[0], { rounds: 101 }, T0))).toMatch(/Rounds must be/);
     expect(err(() => game.updateSettings(ids[0], { rounds: 2.5 }, T0))).toMatch(/Rounds must be/);
     expect(err(() => game.updateSettings(ids[0], { timerSeconds: 5 }, T0))).toMatch(/timer must be/);
     expect(err(() => game.updateSettings(ids[0], { mediaMode: 'gifs' }, T0))).toMatch(/Photos, Videos, or Both/);
@@ -210,22 +210,27 @@ describe('decks, ready, and start rules', () => {
     expect(err(() => game.updateSettings(ids[0], { swaps: 2.5 }, T0))).toMatch(/Swaps must be/);
     expect(errStatus(() => game.updateSettings(ids[0], { swaps: '3' }, T0))).toBe(422);
     game.updateSettings(ids[0], { rounds: 30, breakSeconds: 3, swaps: 0 }, T0);
-    expect(game.state.settings).toEqual({ rounds: 30, timerSeconds: 15, mediaMode: 'videos', breakSeconds: 3, swaps: 0 });
-    game.updateSettings(ids[0], { breakSeconds: 30, swaps: 10 }, T0);
-    expect(game.state.settings).toMatchObject({ breakSeconds: 30, swaps: 10 });
+    expect(game.state.settings).toEqual({ ...defaultSettings(), rounds: 30, timerSeconds: 15, mediaMode: 'videos', breakSeconds: 3, swaps: 0 });
+    game.updateSettings(ids[0], { rounds: 100, breakSeconds: 30, swaps: 10 }, T0);
+    expect(game.state.settings).toMatchObject({ rounds: 100, breakSeconds: 30, swaps: 10 });
   });
 
   it('normalizes old persisted rooms that predate breakSeconds, swaps, and pause', () => {
     const state = newRoom('ABC234', 'inst', T0) as unknown as Record<string, unknown>;
     delete (state.settings as Record<string, unknown>).breakSeconds;
     delete (state.settings as Record<string, unknown>).swaps;
+    delete (state.settings as Record<string, unknown>).evenSplit;
+    delete (state.settings as Record<string, unknown>).effects;
+    delete (state.settings as Record<string, unknown>).powerups;
     delete state.pausedAt;
     delete state.pausedRemainingMs;
     delete state.roundKinds;
+    delete state.schedule;
+    delete state.shopBought;
     // An old open slot has no required kind either.
     (state.slots as Record<string, unknown>[]).push({ id: 's1', round: 1, ownerID: 'p1', status: 'requested', requestedAt: T0, attempts: 0, readyAt: null, tried: [] });
     const game = new Game(state as unknown as RoomState);
-    expect(game.state.settings).toEqual({ rounds: 10, timerSeconds: 20, mediaMode: 'both', breakSeconds: 7, swaps: 3 });
+    expect(game.state.settings).toEqual(defaultSettings());
     expect(game.state.pausedAt).toBeNull();
     expect(game.state.pausedRemainingMs).toBeNull();
     expect(game.state.settings.breakSeconds).toBe(BREAK_SECONDS.default);

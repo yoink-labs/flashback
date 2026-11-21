@@ -15,9 +15,38 @@ struct RoomInfo: Codable, Equatable {
     var joinable: Bool
     var host: String?
     var settings: RoomSettings?
+    /// Milestone 4: the room's bunch sizes. Old servers mean Milestone 3 sizes.
+    var bunch: BunchRequirement = .defaults
 
     var modeSummary: String { settings?.mediaMode.summary ?? "Photos & videos" }
     var rounds: Int { settings?.rounds ?? 10 }
+
+    private enum CodingKeys: String, CodingKey {
+        case code, phase, players, capacity, joinable, host, settings, bunch
+    }
+
+    init(code: String, phase: String, players: Int, capacity: Int, joinable: Bool, host: String?, settings: RoomSettings?, bunch: BunchRequirement = .defaults) {
+        self.code = code
+        self.phase = phase
+        self.players = players
+        self.capacity = capacity
+        self.joinable = joinable
+        self.host = host
+        self.settings = settings
+        self.bunch = bunch
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        code = try c.decode(String.self, forKey: .code)
+        phase = try c.decodeIfPresent(String.self, forKey: .phase) ?? "lobby"
+        players = try c.decodeIfPresent(Int.self, forKey: .players) ?? 0
+        capacity = try c.decodeIfPresent(Int.self, forKey: .capacity) ?? 12
+        joinable = try c.decodeIfPresent(Bool.self, forKey: .joinable) ?? false
+        host = try c.decodeIfPresent(String.self, forKey: .host)
+        settings = try? c.decodeIfPresent(RoomSettings.self, forKey: .settings)
+        bunch = (try? c.decodeIfPresent(BunchRequirement.self, forKey: .bunch)) ?? .defaults
+    }
 }
 
 /// HTTP calls to the Flashback Worker. Guests send no Authorization header when

@@ -1,9 +1,9 @@
-// The bunch rules every player plays by: the same number of photos and videos
-// each (so nobody's camera roll is over-represented), what a short bunch still
-// needs, and how Mix rounds split between photos and videos.
+// The bunch rules every player plays by: how many items of each kind a player
+// must deal, what a short bunch still needs, and how Mix rounds split between
+// photos and videos. docs/MILESTONE3.md §7 and MILESTONE4.md §2.
 import type { MediaKind, MediaMode } from './media';
 
-/** Every player's bunch holds this many photos and this many videos (Mix needs both). */
+/** A full bunch in a room without Even Split. */
 export const PHOTO_BUNCH = 12;
 export const VIDEO_BUNCH = 6;
 
@@ -11,6 +11,30 @@ export const VIDEO_BUNCH = 6;
 export interface Deck {
   photos: number;
   videos: number;
+}
+
+/** How many of each kind one player must deal for this room. */
+export interface BunchRequirement {
+  photos: number;
+  videos: number;
+}
+
+/**
+ * The room's bunch requirement. Without Even Split every player deals the full
+ * bunch. With it, each player deals `ceil(rounds / players)` items, split in
+ * Mix so every one of their rounds has an item.
+ */
+export function bunchFor(mode: MediaMode, evenSplit: boolean, rounds: number, players: number): BunchRequirement {
+  if (!evenSplit) {
+    if (mode === 'photos') return { photos: PHOTO_BUNCH, videos: 0 };
+    if (mode === 'videos') return { photos: 0, videos: VIDEO_BUNCH };
+    return { photos: PHOTO_BUNCH, videos: VIDEO_BUNCH };
+  }
+  const share = Math.ceil(rounds / Math.max(players, 1));
+  if (mode === 'photos') return { photos: share, videos: 0 };
+  if (mode === 'videos') return { photos: 0, videos: share };
+  const videos = Math.round(share / 3);
+  return { photos: share - videos, videos };
 }
 
 /** The kind of each round, with photos and videos in proportion to their bunch sizes. */
@@ -31,30 +55,28 @@ export function balancedRoundKinds(rounds: number, mode: MediaMode, random: { fl
   return kinds;
 }
 
-/** Whether a deck has a full bunch for the mode. */
-export const deckFits = (deck: Deck, mode: MediaMode) =>
-  mode === 'photos'
-    ? deck.photos >= PHOTO_BUNCH
-    : mode === 'videos'
-      ? deck.videos >= VIDEO_BUNCH
-      : deck.photos >= PHOTO_BUNCH && deck.videos >= VIDEO_BUNCH;
+/** Whether a deck has the room's full bunch. */
+export const deckFits = (deck: Deck, bunch: BunchRequirement) => deck.photos >= bunch.photos && deck.videos >= bunch.videos;
+
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+const more = (count: number, noun: string) => `${count} more ${noun}${count === 1 ? '' : 's'}`;
 
 /**
  * What one player's deck still needs, worded as their next task: "Deal 12
  * photos" when the bunch is empty, "Add 2 more videos" when it is short, and
  * the two joined with " and " in Mix.
  */
-export function deckNeed(deck: Deck, mode: MediaMode): string | null {
+export function deckNeed(deck: Deck, bunch: BunchRequirement): string | null {
   const parts: { deal: boolean; text: string }[] = [];
-  if (mode !== 'videos') {
-    const missing = Math.max(0, PHOTO_BUNCH - deck.photos);
-    if (missing === PHOTO_BUNCH) parts.push({ deal: true, text: `${PHOTO_BUNCH} photos` });
-    else if (missing > 0) parts.push({ deal: false, text: `${missing} more photo${missing === 1 ? '' : 's'}` });
+  if (bunch.photos > 0) {
+    const missing = Math.max(0, bunch.photos - deck.photos);
+    if (missing === bunch.photos) parts.push({ deal: true, text: plural(bunch.photos, 'photo') });
+    else if (missing > 0) parts.push({ deal: false, text: more(missing, 'photo') });
   }
-  if (mode !== 'photos') {
-    const missing = Math.max(0, VIDEO_BUNCH - deck.videos);
-    if (missing === VIDEO_BUNCH) parts.push({ deal: true, text: `${VIDEO_BUNCH} videos` });
-    else if (missing > 0) parts.push({ deal: false, text: `${missing} more video${missing === 1 ? '' : 's'}` });
+  if (bunch.videos > 0) {
+    const missing = Math.max(0, bunch.videos - deck.videos);
+    if (missing === bunch.videos) parts.push({ deal: true, text: plural(bunch.videos, 'video') });
+    else if (missing > 0) parts.push({ deal: false, text: more(missing, 'video') });
   }
   if (!parts.length) return null;
   if (parts.every((part) => part.deal)) return `Deal ${parts.map((part) => part.text).join(' and ')}`;

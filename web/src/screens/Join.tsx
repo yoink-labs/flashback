@@ -3,12 +3,14 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { isCode, joinRoom, normalizeCode, roomInfo, savedSession, type RoomInfo } from '../api';
+import { normalizeSettings } from '../types';
 import { Avatar } from '../ui/Avatar';
 import { CodeInput } from '../ui/CodeInput';
 import { TipPill } from '../ui/TipPill';
 import { BackIcon } from '../ui/Icons';
 import { NameInput, useNickname } from './Entry';
 import { modeWord } from '../room/Settings';
+import { SettingsChips } from '../room/SettingsChips';
 
 
 export function JoinScreen() {
@@ -122,20 +124,24 @@ export function JoinScreen() {
 }
 
 function Preview({ info }: { info: RoomInfo }) {
+  const settings = info.settings ? normalizeSettings(info.settings) : null;
   const facts = [
     `${info.players} ${info.players === 1 ? 'player' : 'players'}`,
-    info.settings ? modeWord(info.settings.mediaMode) : null,
-    info.settings ? `${info.settings.rounds} ${info.settings.rounds === 1 ? 'round' : 'rounds'}` : null,
+    settings ? modeWord(settings.mediaMode) : null,
+    settings ? `${settings.rounds} ${settings.rounds === 1 ? 'round' : 'rounds'}` : null,
   ].filter(Boolean);
   return (
-    <div className="room-preview-row" aria-live="polite">
-      <Avatar name={info.host ?? '?'} colorIndex={0} size="md" />
-      <div className="room-preview-text">
-        <p className="headline">{info.host ? `${info.host}’s room` : 'Room'}</p>
-        <p className="caption">
-          {info.phase === 'lobby' ? facts.join(' · ') : info.phase === 'podium' ? 'Finished · waiting for the host' : 'Game in progress'}
-        </p>
+    <div className="room-preview" aria-live="polite">
+      <div className="room-preview-row">
+        <Avatar name={info.host ?? '?'} colorIndex={0} size="md" />
+        <div className="room-preview-text">
+          <p className="headline">{info.host ? `${info.host}’s room` : 'Room'}</p>
+          <p className="caption">
+            {info.phase === 'lobby' ? facts.join(' · ') : info.phase === 'podium' ? 'Finished · waiting for the host' : 'Game in progress'}
+          </p>
+        </div>
       </div>
+      {settings && <SettingsChips settings={settings} className="join-chips" />}
     </div>
   );
 }

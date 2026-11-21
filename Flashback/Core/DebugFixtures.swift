@@ -1,4 +1,5 @@
 #if DEBUG
+import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -6,8 +7,10 @@ import UIKit
 /// players and a generated bunch, with no server and no photo library.
 ///
 /// Routes: lobby, lobbyMix, lobbyVideos, lobbyEmpty, lobbyGuest, settings,
-/// countdown, shuffling, reveal, revealLocked, revealPaused, pausedGuest,
-/// results, resultsOwner, resultsSaveDenied, podium.
+/// settingsEffects, lobbyChips, countdown, shuffling, reveal, revealLocked,
+/// revealPaused, pausedGuest, revealGreyscale, revealBlur, revealFocus,
+/// revealZoom, revealFiftyFifty, revealVideoBlur, results, resultsOwner,
+/// resultsSaveDenied, resultsShop, podium.
 @MainActor enum DebugFixtures {
     static func apply(to room: RoomStore) {
         guard let route = TipDebugLaunch.value("uiRoute") else { return }
@@ -30,6 +33,18 @@ import UIKit
             view.players[1].ready = true
             room.debugLoad(view)
             fill(room.deck, photos: 12, videos: 0, swapsLeft: 0)
+        case "lobbyChips", "settingsEffects":
+            var view = lobby(now: now, mode: .both, host: true)
+            view.settings = arcadeSettings(mode: .both)
+            view.settings.effects = arcadeEffects()
+            view.settings.powerups = PowerupSettings(
+                fiftyFifty: FiftyFiftySettings(enabled: true, after: 3),
+                shop: ShopSettings(enabled: true)
+            )
+            view.players[1].items = PlayerItems(fiftyFifty: 2)
+            view.players[2].items = PlayerItems(doubleDown: 1, shield: 1)
+            room.debugLoad(view)
+            fill(room.deck, photos: 12, videos: 6)
         case "countdown":
             var view = base(now: now, phase: .countdown)
             view.phaseEndsAt = now + 2400
@@ -46,14 +61,48 @@ import UIKit
                 view.pausedRemainingMs = 12_000
             }
             if route == "pausedGuest" { view.you = YouView(id: "p2") }
-            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 4, size: CGSize(width: 1200, height: 900))))
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 4, size: CGSize(width: 900, height: 1200))))
+        case "revealGreyscale":
+            var view = revealWithEffect(now: now, yourEffect: YourEffect(kind: .greyscale, trigger: .right, streak: 3))
+            view.players[1].items = PlayerItems(fiftyFifty: 1)
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 2, size: CGSize(width: 900, height: 1200))))
+        case "revealBlur":
+            var view = revealWithEffect(now: now, yourEffect: YourEffect(kind: .blur, strength: .heavy, trigger: .wrong, streak: 5))
+            view.players[2].items = PlayerItems(shield: 1)
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 3, size: CGSize(width: 900, height: 1200))))
+        case "revealFocus":
+            let effect = RoundEffect(kind: .focus, spanMs: 20_000)
+            let view = revealWithEffect(now: now, effect: effect, revealAt: now - 500)
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 5, size: CGSize(width: 900, height: 1200))))
+        case "revealZoom":
+            let effect = RoundEffect(kind: .zoom, spanMs: 20_000, scale: 3, originX: 0.35, originY: 0.45)
+            let view = revealWithEffect(now: now, effect: effect, revealAt: now - 500)
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 6, size: CGSize(width: 900, height: 1200))))
+        case "revealFiftyFifty":
+            var view = revealWithEffect(now: now, eliminated: ["p3", "p4"], items: PlayerItems(doubleDown: 1, shield: 1))
+            view.players[1].items = PlayerItems(fiftyFifty: 2)
+            view.players[2].items = PlayerItems(shield: 1)
+            room.debugLoad(view, media: MediaBlob(kind: .photo, bytes: photo(index: 7, size: CGSize(width: 900, height: 1200))))
+        case "revealVideoBlur":
+            // A generated clip proves streak blur/desaturation reach the shared
+            // player's layer too, not only photos.
+            var view = revealWithEffect(now: now, yourEffect: YourEffect(kind: .blur, strength: .heavy, trigger: .wrong, streak: 5))
+            view.round?.kind = .video
+            Task { @MainActor in
+                guard let clip = await makeVideo() else { return }
+                room.debugLoad(view, media: MediaBlob(kind: .video, bytes: clip))
+            }
         case "results", "resultsOwner", "resultsSaveDenied":
-            let media = MediaBlob(kind: .photo, bytes: photo(index: 4, size: CGSize(width: 1200, height: 900)))
+            let media = MediaBlob(kind: .photo, bytes: photo(index: 4, size: CGSize(width: 900, height: 1200)))
             room.debugLoad(reveal(now: now, locked: true), media: media)
             room.apply(results(now: now, owner: route == "resultsOwner"))
             if route == "resultsSaveDenied" {
                 room.show(Toast(text: MediaSaver.SaveError.denied.localizedDescription, symbol: "exclamationmark.triangle.fill", isError: true, action: .openSettings))
             }
+        case "resultsShop":
+            let media = MediaBlob(kind: .photo, bytes: photo(index: 8, size: CGSize(width: 900, height: 1200)))
+            room.debugLoad(reveal(now: now, locked: true), media: media)
+            room.apply(resultsShop(now: now))
         case "podium":
             var view = base(now: now, phase: .podium)
             view.players[0].score = 2140
@@ -133,7 +182,149 @@ import UIKit
         return view
     }
 
+    // MARK: - Milestone 4 fixtures
+
+    private static func arcadeEffects() -> EffectsSettings {
+        EffectsSettings(
+            greyscale: GreyscaleSettings(enabled: true, trigger: .right, after: 3),
+            blur: BlurSettings(enabled: true, trigger: .wrong, after: 5, strength: .medium),
+            focus: FocusSettings(enabled: true, frequency: .every, span: 50),
+            zoom: ZoomSettings(enabled: true, frequency: .half, span: 75, scale: 3)
+        )
+    }
+
+    private static func arcadeSettings(mode: MediaMode) -> RoomSettings {
+        var settings = RoomSettings(rounds: 10, timerSeconds: 20, mediaMode: mode, breakSeconds: 7, swaps: 3)
+        settings.evenSplit = true
+        return settings
+    }
+
+    /// A reveal with the Milestone 4 viewer state: streak effect, round effect,
+    /// 50/50 eliminations, and the viewer's held items.
+    private static func revealWithEffect(
+        now: Double,
+        yourEffect: YourEffect? = nil,
+        effect: RoundEffect? = nil,
+        eliminated: [String] = [],
+        items: PlayerItems = .none,
+        revealAt: Double? = nil
+    ) -> RoomView {
+        var view = base(now: now, phase: .reveal)
+        view.phaseEndsAt = now + 13_000
+        view.round = RoundView(
+            index: 3,
+            total: 10,
+            kind: .photo,
+            revealAt: revealAt ?? now - 1200,
+            endsAt: now + 13_000,
+            canGuess: true,
+            guessedCount: 1,
+            guesserCount: 4,
+            yourEffect: yourEffect,
+            effect: effect,
+            eliminated: eliminated
+        )
+        if let index = view.players.firstIndex(where: { $0.id == view.you.id }) {
+            view.players[index].items = items
+        }
+        return view
+    }
+
+    /// Results with the shop open, a breakdown in the "you" card, and a lost
+    /// Double Down in the standings (a negative delta).
+    private static func resultsShop(now: Double) -> RoomView {
+        var view = results(now: now, owner: false)
+        view.settings = arcadeSettings(mode: .both)
+        view.settings.effects = arcadeEffects()
+        view.settings.powerups = PowerupSettings(
+            fiftyFifty: FiftyFiftySettings(enabled: true, after: 3),
+            shop: ShopSettings(enabled: true)
+        )
+        view.phaseEndsAt = now + 12_000
+        view.shop = ShopView(open: true, bought: false, prices: .defaults)
+        view.players[0].items = PlayerItems(doubleDown: 1)
+        view.players[0].score = 900
+        view.players[1].items = PlayerItems(fiftyFifty: 2)
+        view.players[2].items = PlayerItems(shield: 1)
+        if let index = view.lastResult?.rows.firstIndex(where: { $0.playerID == "p1" }) {
+            view.lastResult?.rows[index].points = 760
+            view.lastResult?.rows[index].bonus = 120
+            view.lastResult?.rows[index].earnedFiftyFifty = true
+            view.lastResult?.rows[index].roundEffect = .focus
+            view.lastResult?.rows[index].fiftyFifty = true
+            view.lastResult?.rows[index].total = 900
+        }
+        if let index = view.lastResult?.rows.firstIndex(where: { $0.playerID == "p4" }) {
+            view.lastResult?.rows[index].points = -300
+            view.lastResult?.rows[index].doubleDown = .lost
+            view.lastResult?.rows[index].total = 110
+            view.players[3].score = 110
+        }
+        return view
+    }
+
     // MARK: - Generated media
+
+    /// A short generated clip for the video-effect fixture: a moving white dot
+    /// on a colour wash, so blur and desaturation are visible.
+    private static func makeVideo(size: CGSize = CGSize(width: 640, height: 480), seconds: Double = 3) async -> Data? {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-\(UUID().uuidString).mp4")
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return nil }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(size.width),
+            AVVideoHeightKey: Int(size.height),
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: Int(size.width),
+            kCVPixelBufferHeightKey as String: Int(size.height),
+        ])
+        guard writer.canAdd(input) else { return nil }
+        writer.add(input)
+        guard writer.startWriting() else { return nil }
+        writer.startSession(atSourceTime: .zero)
+
+        let fps = 15
+        for frame in 0..<max(1, Int(seconds * Double(fps))) {
+            while !input.isReadyForMoreMediaData { try? await Task.sleep(for: .milliseconds(5)) }
+            guard let pool = adaptor.pixelBufferPool else { break }
+            var buffer: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
+            guard let buffer else { break }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer),
+               let context = CGContext(
+                   data: base,
+                   width: Int(size.width),
+                   height: Int(size.height),
+                   bitsPerComponent: 8,
+                   bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                   space: CGColorSpaceCreateDeviceRGB(),
+                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+               ) {
+                let t = CGFloat(frame) / CGFloat(max(1, Int(seconds * Double(fps)) - 1))
+                context.setFillColor(UIColor.systemTeal.withAlphaComponent(0.9).cgColor)
+                context.fill(CGRect(origin: .zero, size: size))
+                context.setFillColor(UIColor.systemPink.withAlphaComponent(0.85).cgColor)
+                context.fill(CGRect(x: 0, y: 0, width: size.width, height: size.height * 0.35))
+                context.setFillColor(UIColor.white.cgColor)
+                let dot = size.width * 0.22
+                context.fillEllipse(in: CGRect(x: size.width * (0.12 + 0.5 * t), y: size.height * 0.5, width: dot, height: dot))
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(fps)))
+        }
+        input.markAsFinished()
+        await withCheckedContinuation { continuation in
+            writer.finishWriting { continuation.resume() }
+        }
+        guard writer.status == .completed else { return nil }
+        let data = try? Data(contentsOf: url)
+        try? FileManager.default.removeItem(at: url)
+        return data
+    }
 
     private static func fill(_ deck: DeckStore, photos: Int, videos: Int, swapsLeft: Int? = nil) {
         let photoItems = (0..<photos).map { index in
