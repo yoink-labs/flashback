@@ -19,12 +19,13 @@ final class StoreKitTipClientTests: XCTestCase {
         session.storefront = "USA"
     }
 
-    /// StoreKitTest purchases hang on the hosted GitHub macOS runner (no
-    /// purchase UI host there), so CI sets
+    /// On the hosted GitHub macOS runner StoreKitTest purchases hang and
+    /// storefront changes never apply, so CI sets
     /// TEST_RUNNER_FLASHBACK_SKIP_STOREKIT_PURCHASES=1 and these run locally.
+    /// (TipJarStoreTests covers the storefront gate with a scripted client.)
     private func requirePurchaseUI() throws {
         if ProcessInfo.processInfo.environment["FLASHBACK_SKIP_STOREKIT_PURCHASES"] == "1" {
-            throw XCTSkip("StoreKitTest purchases are skipped on CI")
+            throw XCTSkip("StoreKitTest purchases and storefront changes are skipped on CI")
         }
     }
 
@@ -94,6 +95,7 @@ final class StoreKitTipClientTests: XCTestCase {
     }
 
     func testStorefrontGate() async throws {
+        try requirePurchaseUI()
         let client = StoreKitTipClient()
         for (code, shows) in [("USA", true), ("GBR", false), ("BRA", false)] {
             session.storefront = code
