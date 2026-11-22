@@ -5,27 +5,41 @@
 #
 #   scripts/submit-appstore-tips.sh            # dry run (default): plan + readiness, changes nothing
 #   scripts/submit-appstore-tips.sh --submit   # apply the plan and submit for App Review
+#   scripts/submit-appstore-tips.sh --submit --iaps-selected-in-asc
+#       # the tips were ticked by hand on the version page in App Store
+#       # Connect; skip attaching them and submit the draft as it stands
 #
 # The plan:
 #   1. Reuse the editable App Store version (or create one) with the same
 #      marketing version as project.yml. Never bumps the marketing version;
 #      an editable placeholder with another version string is renamed to it.
 #   2. Attach the newest VALID, unexpired build of that marketing version.
-#   3. Add every READY_TO_SUBMIT dev.yoinklabs.flashback.tip.* consumable
-#      (its IAP version) to the same review submission.
-#   4. Submit. --submit refuses to run while `asc validate` reports blockers.
+#   3. Create (or reuse) the READY_FOR_REVIEW review draft and stage every
+#      READY_TO_SUBMIT dev.yoinklabs.flashback.tip.* consumable's IAP version
+#      in it (`asc review items add --item-type inAppPurchaseVersions`), then
+#      add the App Store version to the same draft.
+#   4. Submit, only when the version and every tip are in the draft. If any
+#      step fails, the draft is left unsubmitted and the exact Apple error is
+#      printed. If Apple insists the tips be selected on the version page,
+#      tick them under "In-App Purchases and Subscriptions" in App Store
+#      Connect and rerun with --submit --iaps-selected-in-asc. Refuses while
+#      `asc validate` reports blockers.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 APP_ID="${FLASHBACK_ASC_APP_ID:-6837154899}"
 TIP_PREFIX="dev.yoinklabs.flashback.tip."
 MODE="dry-run"
-case "${1:-}" in
-  ""|--dry-run) MODE="dry-run" ;;
-  --submit) MODE="submit" ;;
-  -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
-  *) echo "Unknown option: $1 (use --dry-run or --submit)" >&2; exit 2 ;;
-esac
+IAPS_SELECTED_IN_ASC=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) MODE="dry-run" ;;
+    --submit) MODE="submit" ;;
+    --iaps-selected-in-asc) IAPS_SELECTED_IN_ASC=1 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $arg (use --dry-run, --submit, --iaps-selected-in-asc)" >&2; exit 2 ;;
+  esac
+done
 
 command -v asc >/dev/null || { echo "asc CLI not found" >&2; exit 1; }
 MARKETING=$(sed -n "s/^ *MARKETING_VERSION: *'\{0,1\}\([^']*\)'\{0,1\} *$/\1/p" project.yml | head -1)
@@ -165,17 +179,47 @@ elif [ "$VERSION_STRING" != "$MARKETING" ]; then
 fi
 asc versions attach-build --version-id "$VERSION_ID" --build-id "$BUILD_ID" --output json >/dev/null
 
-SUBMISSION_ID=$(asc review submissions-create --app "$APP_ID" --platform IOS --output json \
-  | json 'import json,sys; print(json.load(sys.stdin)["data"]["id"])')
-asc review items add --submission "$SUBMISSION_ID" --item-type appStoreVersions --item-id "$VERSION_ID" --if-exists skip --output json >/dev/null
-for iap_id in "${READY_IAPS[@]}"; do
-  IAP_VERSION=$(asc iap versions list --iap-id "$iap_id" --output json | json '
+# Reuse an open draft, else create one.
+SUBMISSION_ID=$(asc review submissions-list --app "$APP_ID" --output json | json '
+import json, sys
+rows = [r for r in json.load(sys.stdin).get("data", []) if r["attributes"].get("state") == "READY_FOR_REVIEW"]
+print(rows[0]["id"] if rows else "")')
+if [ -z "$SUBMISSION_ID" ]; then
+  SUBMISSION_ID=$(asc review submissions-create --app "$APP_ID" --platform IOS --output json \
+    | json 'import json,sys; print(json.load(sys.stdin)["data"]["id"])')
+fi
+say "Review draft: $SUBMISSION_ID"
+
+if [ "$IAPS_SELECTED_IN_ASC" = 1 ]; then
+  say "Tips: selected by hand on the version page (--iaps-selected-in-asc); not staging them."
+else
+  FAILED=0
+  for iap_id in "${READY_IAPS[@]}"; do
+    IAP_VERSION=$(asc iap versions list --iap-id "$iap_id" --output json | json '
 import json, sys
 rows = json.load(sys.stdin).get("data", [])
 rows.sort(key=lambda v: v["attributes"].get("version") or 0, reverse=True)
 print(rows[0]["id"] if rows else "-")')
-  [ "$IAP_VERSION" != "-" ] || { say "No IAP version for $iap_id"; exit 1; }
-  asc review items add --submission "$SUBMISSION_ID" --item-type inAppPurchaseVersions --item-id "$IAP_VERSION" --if-exists skip --output json >/dev/null
-done
+    if [ "$IAP_VERSION" != "-" ] && OUT=$(asc review items add --submission "$SUBMISSION_ID" --item-type inAppPurchaseVersions \
+        --item-id "$IAP_VERSION" --if-exists skip --output json 2>&1); then
+      say "  staged tip $iap_id"
+    else
+      FAILED=$((FAILED + 1))
+      say "  FAILED to stage tip $iap_id: $(printf '%s' "${OUT:-no IAP version}" | tail -c 400)"
+    fi
+  done
+  if [ "$FAILED" -gt 0 ]; then
+    say "Not submitted: $FAILED tip(s) could not be staged; draft $SUBMISSION_ID left unsubmitted."
+    say "Tick the tips on the version page in App Store Connect, then rerun with --submit --iaps-selected-in-asc."
+    exit 1
+  fi
+fi
+
+if ! OUT=$(asc review items add --submission "$SUBMISSION_ID" --item-type appStoreVersions --item-id "$VERSION_ID" --if-exists skip --output json 2>&1); then
+  say "Not submitted: Apple refused the App Store version; draft $SUBMISSION_ID left unsubmitted with the tips staged."
+  printf '%s\n' "$OUT" | sed 's/^/  /'
+  exit 1
+fi
+
 asc review submissions-submit --id "$SUBMISSION_ID" --confirm --output json >/dev/null
-say "Submitted: version $MARKETING ($BUILD_NUMBER) with ${#READY_IAPS[@]} tip IAP(s); review submission $SUBMISSION_ID"
+say "Submitted: version $MARKETING ($BUILD_NUMBER) with the tip IAPs; review submission $SUBMISSION_ID"
