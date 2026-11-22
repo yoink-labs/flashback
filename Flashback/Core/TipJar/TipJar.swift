@@ -11,6 +11,10 @@ enum TipTier: String, CaseIterable, Identifiable, Sendable {
     case small
     case medium
     case large
+    case xl
+    case xxl
+    case huge
+    case max
 
     var id: String { rawValue }
 
@@ -29,6 +33,10 @@ enum TipTier: String, CaseIterable, Identifiable, Sendable {
         case .small: return "Small tip"
         case .medium: return "Medium tip"
         case .large: return "Large tip"
+        case .xl: return "Extra-large tip"
+        case .xxl: return "Generous tip"
+        case .huge: return "Huge tip"
+        case .max: return "Biggest tip"
         }
     }
 
@@ -37,6 +45,10 @@ enum TipTier: String, CaseIterable, Identifiable, Sendable {
         case .small: return "hand.thumbsup.fill"
         case .medium: return "cup.and.saucer.fill"
         case .large: return "heart.fill"
+        case .xl: return "fork.knife"
+        case .xxl: return "gift.fill"
+        case .huge: return "star.fill"
+        case .max: return "sparkles"
         }
     }
 }
@@ -85,17 +97,44 @@ protocol TipStoreClient: Sendable {
     /// transaction left unfinished by a previous launch. Each is finished
     /// before it's yielded.
     func completedTips() -> AsyncStream<String>
+    /// ISO 3166-1 alpha-3 code of the App Store storefront, or nil if unknown.
+    func storefrontCountryCode() async -> String?
+}
+
+/// Where "Give any amount" points. Opened in Safari, never in the app.
+enum TipLinks {
+    static let giveAnyAmount = URL(string: "https://yoinklabs.dev/tip")!
+
+    /// App Review Guideline 3.1.1(a)/3.1.3: a link to another way to pay is
+    /// allowed without an entitlement only on the United States storefront.
+    /// Unknown storefront means no link.
+    static func allowsExternalTipLink(storefrontCountryCode code: String?) -> Bool {
+        code == "USA"
+    }
 }
 
 /// StoreKit 2, no third-party SDK.
 struct StoreKitTipClient: TipStoreClient {
+    /// The `Product`s from the last load, so a tap buys exactly what the
+    /// row showed without another App Store round trip.
+    private let cache = ProductCache()
+    /// Transactions already finished and reported, so one delivered through
+    /// both `Transaction.updates` and `Transaction.unfinished` thanks once.
+    private let ledger = FinishedLedger()
+
     func canMakePayments() async -> Bool {
         AppStore.canMakePayments
     }
 
+    func storefrontCountryCode() async -> String? {
+        await Storefront.current?.countryCode
+    }
+
     func products(for ids: [String]) async throws -> [TipProduct] {
         do {
-            return try await Product.products(for: ids).compactMap { product in
+            let loaded = try await Product.products(for: ids)
+            await cache.store(loaded)
+            return loaded.compactMap { product in
                 guard let tier = TipTier(productID: product.id) else { return nil }
                 return TipProduct(
                     id: product.id,
@@ -113,13 +152,17 @@ struct StoreKitTipClient: TipStoreClient {
 
     func purchase(productID: String) async throws -> TipPurchaseResult {
         let product: Product
-        do {
-            guard let found = try await Product.products(for: [productID]).first else {
-                throw TipJarError.productUnavailable
+        if let cached = await cache.product(for: productID) {
+            product = cached
+        } else {
+            do {
+                guard let found = try await Product.products(for: [productID]).first else {
+                    throw TipJarError.productUnavailable
+                }
+                product = found
+            } catch {
+                throw Self.map(error)
             }
-            product = found
-        } catch {
-            throw Self.map(error)
         }
 
         let result: Product.PurchaseResult
@@ -134,11 +177,14 @@ struct StoreKitTipClient: TipStoreClient {
         switch result {
         case .success(let verification):
             guard case .verified(let transaction) = verification else {
-                // Nothing is granted for a tip, but an unverified receipt is
-                // left unfinished so StoreKit can re-deliver it.
+                // No thank-you for a purchase we can't verify. A tip grants
+                // nothing, so finish it anyway; left unfinished it would be
+                // re-delivered at every launch.
+                await verification.unsafePayloadValue.finish()
                 throw TipJarError.unverified
             }
             await transaction.finish()
+            await ledger.markFinished(transaction.id)
             return .success(productID: transaction.productID)
         case .pending:
             return .pending
@@ -157,12 +203,12 @@ struct StoreKitTipClient: TipStoreClient {
                     // unfinished backlog drains.
                     group.addTask {
                         for await verification in Transaction.updates {
-                            if let id = await Self.finishIfTip(verification) { continuation.yield(id) }
+                            if let id = await finishIfTip(verification) { continuation.yield(id) }
                         }
                     }
                     group.addTask {
                         for await verification in Transaction.unfinished {
-                            if let id = await Self.finishIfTip(verification) { continuation.yield(id) }
+                            if let id = await finishIfTip(verification) { continuation.yield(id) }
                         }
                     }
                 }
@@ -172,11 +218,16 @@ struct StoreKitTipClient: TipStoreClient {
         }
     }
 
-    private static func finishIfTip(_ verification: VerificationResult<Transaction>) async -> String? {
-        guard case .verified(let transaction) = verification,
-              TipTier(productID: transaction.productID) != nil else { return nil }
+    /// Finishes any tip transaction (verified or not, since a tip grants
+    /// nothing) and returns its product id only if it's verified, not
+    /// refunded, and not already reported.
+    private func finishIfTip(_ verification: VerificationResult<Transaction>) async -> String? {
+        let transaction = verification.unsafePayloadValue
+        guard TipTier(productID: transaction.productID) != nil else { return nil }
         await transaction.finish()
-        return transaction.revocationDate == nil ? transaction.productID : nil
+        guard case .verified = verification, transaction.revocationDate == nil,
+              await ledger.markFinished(transaction.id) else { return nil }
+        return transaction.productID
     }
 
     static func map(_ error: Error) -> Error {
@@ -198,6 +249,18 @@ struct StoreKitTipClient: TipStoreClient {
         if error is URLError { return TipJarError.network }
         return TipJarError.other(error.localizedDescription)
     }
+}
+
+private actor ProductCache {
+    private var products: [String: Product] = [:]
+    func store(_ loaded: [Product]) { for product in loaded { products[product.id] = product } }
+    func product(for id: String) -> Product? { products[id] }
+}
+
+private actor FinishedLedger {
+    private var ids: Set<UInt64> = []
+    /// True the first time an id is seen.
+    @discardableResult func markFinished(_ id: UInt64) -> Bool { ids.insert(id).inserted }
 }
 
 @MainActor
@@ -234,6 +297,9 @@ final class TipJarStore: ObservableObject {
     @Published private(set) var loadState: LoadState = .idle
     @Published private(set) var purchaseState: PurchaseState = .idle
     @Published private(set) var canMakePayments = true
+    /// "Give any amount" (a link out to yoinklabs.dev) shows only on the US
+    /// storefront. See `TipLinks.allowsExternalTipLink`.
+    @Published private(set) var showsGiveAnyAmountLink = false
     /// Bumps on every completed tip; drives the success haptic.
     @Published private(set) var thanksCount = 0
 
@@ -253,6 +319,7 @@ final class TipJarStore: ObservableObject {
         if loadState == .loading { return }
         loadState = .loading
         canMakePayments = await client.canMakePayments()
+        await refreshStorefront()
         do {
             let found = try await client.products(for: TipTier.productIDs)
             products = Self.ordered(found)
@@ -261,6 +328,14 @@ final class TipJarStore: ObservableObject {
             products = []
             loadState = .failed(Self.message(for: error))
         }
+    }
+
+    /// Rechecks the storefront (it can change while the app runs) without
+    /// reloading products.
+    func refreshStorefront() async {
+        showsGiveAnyAmountLink = TipLinks.allowsExternalTipLink(
+            storefrontCountryCode: await client.storefrontCountryCode()
+        )
     }
 
     func purchase(_ product: TipProduct) async {

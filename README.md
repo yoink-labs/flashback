@@ -47,11 +47,18 @@ Every authenticated call (WebSocket, upload, media, leave) accepts **either** a 
 
 Flashback is free with nothing locked. Tips are optional StoreKit 2
 consumables that unlock nothing: `dev.yoinklabs.flashback.tip.small`,
-`.medium` and `.large` (App Store Connect; prices always come from StoreKit).
-They open from the pink "Tip the devs" capsule on Home and the row in About.
-`Flashback/Resources/Flashback.storekit` mirrors them for the scheme and tests.
-DEBUG screenshot flags: `-uiTipJar config` (serve the .storekit file without
-StoreKit), `-uiTipOutcome thanks|pending|failed|cancel`, `-uiRoute tipJar|about`.
+`.medium`, `.large`, `.xl`, `.xxl`, `.huge` and `.max` ($0.99 to $99.99 in
+the US; prices always come from StoreKit). They open from the pink "Tip the
+devs" capsule on Home and the row in About. On the United States storefront
+only (`Storefront.current?.countryCode == "USA"`, Guideline 3.1.1(a)), the tip
+jar also links out to https://yoinklabs.dev/tip in Safari to tip any amount;
+it's hidden on every other storefront and when the storefront is unknown.
+`Flashback/Resources/Flashback.storekit` mirrors all seven for the scheme's Run
+action and tests. DEBUG screenshot flags: `-uiTipJar config|unavailable`
+(serve the .storekit file without StoreKit, or no products),
+`-uiTipOutcome thanks|pending|failed|cancel`, `-uiTipStorefront USA|GBR|none`,
+`-uiRoute tipJar|about`. `scripts/submit-appstore-tips.sh` plans the App Store
+submission with the tips (dry run by default; `--submit` to send).
 The web header links to https://yoinklabs.dev/tip, which explains where tipping
 happens; nothing is paid on the web.
 
