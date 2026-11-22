@@ -32,6 +32,8 @@ jobs:
     runs-on: xcode-27
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      # StoreKitTest purchase sheets hang on hosted runners; run those locally.
+      TEST_RUNNER_FLASHBACK_SKIP_STOREKIT_PURCHASES: '1'
     steps:
       - uses: actions/checkout@v4
       - run: brew install xcodegen

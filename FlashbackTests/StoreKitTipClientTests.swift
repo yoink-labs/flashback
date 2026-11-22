@@ -19,6 +19,15 @@ final class StoreKitTipClientTests: XCTestCase {
         session.storefront = "USA"
     }
 
+    /// StoreKitTest purchases hang on the hosted GitHub macOS runner (no
+    /// purchase UI host there), so CI sets
+    /// TEST_RUNNER_FLASHBACK_SKIP_STOREKIT_PURCHASES=1 and these run locally.
+    private func requirePurchaseUI() throws {
+        if ProcessInfo.processInfo.environment["FLASHBACK_SKIP_STOREKIT_PURCHASES"] == "1" {
+            throw XCTSkip("StoreKitTest purchases are skipped on CI")
+        }
+    }
+
     override func tearDown() async throws {
         session.clearTransactions()
         session = nil
@@ -31,6 +40,7 @@ final class StoreKitTipClientTests: XCTestCase {
     }
 
     func testPurchaseIsVerifiedAndFinished() async throws {
+        try requirePurchaseUI()
         let client = StoreKitTipClient()
         _ = try await client.products(for: TipTier.productIDs)
 
@@ -45,6 +55,7 @@ final class StoreKitTipClientTests: XCTestCase {
     }
 
     func testStoreShowsThanksAfterARealPurchase() async throws {
+        try requirePurchaseUI()
         let store = TipJarStore(client: StoreKitTipClient())
         await store.load()
         let product = try XCTUnwrap(store.products.first { $0.tier == .max })
@@ -56,6 +67,7 @@ final class StoreKitTipClientTests: XCTestCase {
     }
 
     func testFailedPurchaseSurfacesAnErrorAndNoThanks() async throws {
+        try requirePurchaseUI()
         try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
         let store = TipJarStore(client: StoreKitTipClient())
         await store.load()
@@ -69,6 +81,7 @@ final class StoreKitTipClientTests: XCTestCase {
     }
 
     func testUnverifiedPurchaseGetsNoThanks() async throws {
+        try requirePurchaseUI()
         try await session.setSimulatedError(.verification(.invalidSignature), forAPI: .verification)
         let store = TipJarStore(client: StoreKitTipClient())
         await store.load()
