@@ -7,6 +7,7 @@ struct TipJarView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ScrollView {
@@ -14,6 +15,7 @@ struct TipJarView: View {
                 header
                 statusCard
                 tipsSection
+                if store.showsGiveAnyAmountLink { giveAnyAmountLink }
                 footnote
             }
             .padding(.horizontal, Spacing.pageCompact)
@@ -29,7 +31,7 @@ struct TipJarView: View {
         .sensoryFeedback(.success, trigger: store.thanksCount)
         .onChange(of: store.purchaseState) { _, state in announce(state) }
         .task {
-            if store.loadState != .loaded { await store.load() }
+            if store.loadState != .loaded { await store.load() } else { await store.refreshStorefront() }
         }
         .refreshable { await store.load() }
         .accessibilityIdentifier("tip-jar")
@@ -126,7 +128,7 @@ struct TipJarView: View {
             .accessibilityIdentifier("tip-jar-unavailable")
         case .failed(let message):
             TipNotice(
-                title: "Couldn't load tips",
+                title: "Tips aren't available yet",
                 message: message,
                 retry: { Task { await store.load() } }
             )
@@ -196,6 +198,44 @@ struct TipJarView: View {
         .overlay { ProgressView().tint(Palette.text2) }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Loading tips")
+    }
+
+    /// US storefront only (App Review Guideline 3.1.1(a)). Opens Safari.
+    private var giveAnyAmountLink: some View {
+        Button {
+            openURL(TipLinks.giveAnyAmount)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "safari")
+                    .font(.fl(17, .semibold))
+                    .foregroundStyle(Palette.text2)
+                    .frame(width: 28)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Want to give more?")
+                        .font(.fl(17, .semibold))
+                        .foregroundStyle(Palette.text)
+                    Text("Tip any amount at yoinklabs.dev")
+                        .font(.fl(14))
+                        .foregroundStyle(Palette.text2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "arrow.up.right")
+                    .font(.fl(14, .semibold))
+                    .foregroundStyle(Palette.text3)
+                    .accessibilityHidden(true)
+            }
+            .padding(16)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.media, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Want to give more? Tip any amount at yoinklabs.dev")
+        .accessibilityHint("Opens yoinklabs.dev in Safari")
+        .accessibilityAddTraits(.isLink)
+        .accessibilityIdentifier("tip-jar-give-any-amount")
     }
 
     private var footnote: some View {

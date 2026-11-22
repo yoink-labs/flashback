@@ -5,6 +5,7 @@ import XCTest
 /// A scripted StoreKit stand-in.
 private final class FakeTipClient: TipStoreClient, @unchecked Sendable {
     var paymentsAllowed = true
+    var storefront: String? = "USA"
     var productsResult: Result<[TipProduct], Error> = .success([])
     var purchaseResult: Result<TipPurchaseResult, Error> = .success(.cancelled)
     private(set) var purchasedIDs: [String] = []
@@ -28,6 +29,8 @@ private final class FakeTipClient: TipStoreClient, @unchecked Sendable {
 
     func completedTips() -> AsyncStream<String> { updates }
 
+    func storefrontCountryCode() async -> String? { storefront }
+
     func deliver(_ productID: String) { updatesContinuation.yield(productID) }
 }
 
@@ -49,6 +52,10 @@ final class TipJarStoreTests: XCTestCase {
             "dev.yoinklabs.flashback.tip.small",
             "dev.yoinklabs.flashback.tip.medium",
             "dev.yoinklabs.flashback.tip.large",
+            "dev.yoinklabs.flashback.tip.xl",
+            "dev.yoinklabs.flashback.tip.xxl",
+            "dev.yoinklabs.flashback.tip.huge",
+            "dev.yoinklabs.flashback.tip.max",
         ])
         XCTAssertEqual(TipTier(productID: "dev.yoinklabs.flashback.tip.medium"), .medium)
         XCTAssertNil(TipTier(productID: "dev.yoinklabs.flashback.pro"))
@@ -86,6 +93,49 @@ final class TipJarStoreTests: XCTestCase {
 
     func testEmptyDisplayNameFallsBackToTierTitle() {
         XCTAssertEqual(tip(.large, price: 5, name: "  ").title, "Large tip")
+    }
+
+    func testSomeTiersMissingStillShowsTheRest() async {
+        let client = FakeTipClient()
+        // e.g. the higher tiers not yet approved in App Store Connect.
+        client.productsResult = .success([tip(.medium, price: 3), tip(.small, price: 1)])
+        let store = TipJarStore(client: client)
+
+        await store.load()
+
+        XCTAssertEqual(store.loadState, .loaded)
+        XCTAssertEqual(store.products.map(\.tier), [.small, .medium])
+    }
+
+    func testGiveAnyAmountLinkOnlyOnTheUSStorefront() {
+        XCTAssertTrue(TipLinks.allowsExternalTipLink(storefrontCountryCode: "USA"))
+        for code in ["GBR", "BRA", "CAN", "usa", "US", "", nil] as [String?] {
+            XCTAssertFalse(TipLinks.allowsExternalTipLink(storefrontCountryCode: code), "\(String(describing: code))")
+        }
+        XCTAssertEqual(TipLinks.giveAnyAmount.absoluteString, "https://yoinklabs.dev/tip")
+    }
+
+    func testStoreShowsLinkForUSAndHidesElsewhere() async {
+        for (code, expected) in [("USA", true), ("GBR", false), ("BRA", false), (nil, false)] as [(String?, Bool)] {
+            let client = FakeTipClient()
+            client.storefront = code
+            client.productsResult = .success([tip(.small, price: 1)])
+            let store = TipJarStore(client: client)
+            await store.load()
+            XCTAssertEqual(store.showsGiveAnyAmountLink, expected, "\(String(describing: code))")
+        }
+    }
+
+    func testDoubleTapBuysOnce() async {
+        let client = FakeTipClient()
+        client.purchaseResult = .success(.success(productID: TipTier.small.productID))
+        let store = TipJarStore(client: client)
+
+        async let first: Void = store.purchase(tip(.small, price: 1))
+        async let second: Void = store.purchase(tip(.small, price: 1))
+        _ = await (first, second)
+
+        XCTAssertEqual(client.purchasedIDs, [TipTier.small.productID])
     }
 
     func testNoProductsIsUnavailableNotAnError() async {
@@ -200,6 +250,17 @@ final class TipJarStoreTests: XCTestCase {
         XCTAssertEqual(byTier[.large]?.displayName, "Large tip")
         XCTAssertEqual(byTier[.large]?.description, "A big thank-you to the devs.")
         XCTAssertEqual(byTier[.large]?.price, Decimal(string: "4.99"))
+        XCTAssertEqual(byTier[.xl]?.price, Decimal(string: "9.99"))
+        XCTAssertEqual(byTier[.xxl]?.price, Decimal(string: "19.99"))
+        XCTAssertEqual(byTier[.huge]?.price, Decimal(string: "49.99"))
+        XCTAssertEqual(byTier[.max]?.price, Decimal(string: "99.99"))
+        // Tip wording only (Undrift LLC is for-profit): never a donation.
+        for product in products {
+            let text = (product.displayName + " " + product.description).lowercased()
+            XCTAssertFalse(text.contains("donat") || text.contains("charit") || text.contains("deductible"), text)
+            XCTAssertLessThanOrEqual(product.displayName.count, 30)
+            XCTAssertLessThanOrEqual(product.description.count, 45)
+        }
     }
 
     func testDebugConfigClientReadsPricesFromTheStoreKitFile() async throws {
@@ -208,7 +269,7 @@ final class TipJarStoreTests: XCTestCase {
 
         let products = TipJarStore.ordered(try await client.products(for: TipTier.productIDs))
 
-        XCTAssertEqual(products.map(\.tier), [.small, .medium, .large])
+        XCTAssertEqual(products.map(\.tier), TipTier.allCases)
         XCTAssertTrue(products.allSatisfy { $0.price > 0 && $0.displayPrice.hasPrefix("$") })
         XCTAssertTrue(products.allSatisfy { !$0.displayName.isEmpty })
     }
